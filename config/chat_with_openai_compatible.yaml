@@ -8,6 +8,7 @@ default:
     cert_key: "ssl_certs/localhost.key"
   chat_engine:
     model_root: "models"
+    concurrent_limit: 1
     handler_search_path:
       - "src/handlers"
     handler_configs:
@@ -31,7 +32,7 @@ default:
         module: tts/cosyvoice/tts_handler_cosyvoice
         # api_url: 'http://127.0.0.1:50000/inference_sft' #run CosyVoice/runtime/python/fastapi/server.py
         model_name: "iic/CosyVoice-300M-SFT" # run cosyvoice in code
-        spk_id: "中文女" # use sft model
+        spk_id: "英文女" # English female voice (use "英文男" for male)
         # ref_audio_path: "open-video-chat/src/third_party/CosyVoice/asset/zero_shot_prompt.wav" #use zero_shot model
         # ref_audio_text: "希望你以后能够做的比我还好呦。"
         sample_rate: 24000
@@ -39,13 +40,13 @@ default:
       LLMOpenAICompatible:
         enabled: True
         module: llm/openai_compatible/llm_handler_openai_compatible
-        model_name: "qwen-plus"
+        model_name: "llama3.2-vision:11b"
         enable_video_input: False # ensure your llm support video input
         history_length: 20
-        # model_name: "gemini-2.0-flash"
-        system_prompt: "请你扮演一个 AI 助手，用简短的两三句对话来回答用户的问题，并在对话内容中加入合适的标点符号，不需要讨论标点符号相关的内容"
-        api_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
-        # api_url: 'http://127.0.0.1:11434/v1' # ollama
+        system_prompt: "You are an AI assistant named Vanessa. Respond to questions briefly and naturally, using appropriate punctuation. You always respond in English."
+        api_url: 'http://127.0.0.1:11434/v1' # ollama
+        api_key: "ollama" # Ollama doesn't validate API keys, any value works
+        # api_url: "https://dashscope.aliyuncs.com/compatible-mode/v1" # Bailian API
         # api_url: 'https://generativelanguage.googleapis.com/v1beta/openai/'
         # api_key: '' # default=os.getenv("DASHSCOPE_API_KEY")
       LiteAvatar:
@@ -54,4 +55,4 @@ default:
         fps: 25
         debug: false
         enable_fast_mode: false
-        use_gpu: true
+        use_gpu: false

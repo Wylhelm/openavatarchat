@@ -14,38 +14,46 @@ default:
     handler_configs:
       LamClient:
         module: client/h5_rendering_client/client_handler_lam
-        asset_path: "lam_samples/barbara.zip"
+        asset_path: "lam_samples/moi.zip"
         # max time a session will last for
         connection_ttl: 900
       SileroVad:
         module: vad/silerovad/vad_handler_silero
-        speaking_threshold: 0.5
+        speaking_threshold: 0.6  # Increased to reduce false positives from background noise
         start_delay: 2048
         end_delay: 5000
         buffer_look_back: 5000
         speech_padding: 512
-      SenseVoice:
+      Whisper:
         enabled: True
-        module: asr/sensevoice/asr_handler_sensevoice
-        model_name: "iic/SenseVoiceSmall"
-      CosyVoice:
+        module: asr/whisper/asr_handler_whisper
+        model_name: "medium"  # Options: tiny, base, small, medium, large
+        language: "fr"  # Force French language
+      # SenseVoice:
+      #   enabled: False
+      #   module: asr/sensevoice/asr_handler_sensevoice
+      #   model_name: "iic/SenseVoiceSmall"
+      ElevenLabs:
         enabled: True
-        module: tts/bailian_tts/tts_handler_cosyvoice_bailian
-        voice: "longxiaocheng"
-        model_name: "cosyvoice-v1"
-        # api_key: "" # default=os.getenv("DASHSCOPE_API_KEY")
+        module: tts/elevenlabs/tts_handler_elevenlabs
+        api_key: "sk_f816c34ec8c96dfeefae46c6552a750c79314f1d59447ba8"  # Replace with your ElevenLabs API key or set ELEVENLABS_API_KEY env var
+        voice_id: "t373Bu2lZYr0dXL8pzG7"  # Replace with your French male voice ID from ElevenLabs
+        model_id: "eleven_multilingual_v2"  # Multilingual model for French support
+        sample_rate: 24000
+        stability: 0.5  # Voice stability (0.0 to 1.0)
+        similarity_boost: 0.75  # Voice similarity boost (0.0 to 1.0)
       LLMOpenAICompatible:
         enabled: True
         module: llm/openai_compatible/llm_handler_openai_compatible
-        model_name: "qwen-plus"
-        enable_video_input: False # ensure your llm support video input
+        model_name: "mistral-small3.2:latest"
+        enable_video_input: True # ensure your llm support video input
         history_length: 20
-        # model_name: "gemini-2.0-flash"
-        system_prompt: "请你扮演一个 AI 助手，用简短的两三句对话来回答用户的问题，并在对话内容中加入合适的标点符号，不需要讨论标点符号相关的内容"
-        api_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
-        # api_url: 'http://127.0.0.1:11434/v1' # ollama
-        # api_url: 'https://generativelanguage.googleapis.com/v1beta/openai/'
-        # api_key: "" # default=os.getenv("DASHSCOPE_API_KEY")
+        # system_prompt: "Tu es Guillaume, un assistant intelligent qui parle français couramment. Tu as la capacité de vision. RÈGLES STRICTES: 1) Utilise TOUJOURS les accents français corrects (é, è, ê, à, ç, etc.). Exemples: 'être' pas 'etre', 'fatigué' pas 'fatigue', 'français' pas 'francais'. 2) Utilise une grammaire française correcte et naturelle. 3) Ajoute la ponctuation appropriée. 4) Parle de manière fluide et conversationnelle. 5) Réponds uniquement aux questions posées, de manière brève et concise."
+        system_prompt: "Tu es un assistant intelligent nommé Guillaume. Tu parles français couramment. Tu as une belle personnalité engageante et stimulante.Tu réponds aux questions de manière concise et brève. Tu as la capacité de vision."
+        temperature: 0.7  # Balanced for natural conversation
+        max_tokens: 300  # Allow longer, complete responses
+        api_url: 'http://127.0.0.1:11434/v1' # ollama
+        api_key: "ollama" # Ollama doesn't validate API keys, any value works
       # Dify:
       #   enabled: True
       #   module: llm/dify/llm_handler_dify

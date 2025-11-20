@@ -125,40 +125,71 @@ class HandlerTTS(HandlerBase, ABC):
                 for sentence in complete_sentences:
                     if len(sentence.strip()) < 1:
                         continue
-                    logger.info('current sentence' + sentence)
-                    
-                    communicate = edge_tts.Communicate(sentence, self.voice)
-                    data = b''
+                    logger.info('current sentence: ' + sentence)
+                    try:
+                        logger.info(f"Calling Edge TTS with voice: {self.voice}")
+                        communicate = edge_tts.Communicate(sentence, self.voice)
+                        data = b''
+                        chunk_count = 0
 
-                    for chunk in communicate.stream_sync():
-                        if chunk['type'] == 'audio':
-                            # tts_audio = chunk['data']
-                            data += chunk['data']
-                    
-                    output_audio = librosa.load(io.BytesIO(data), sr=None)[0]
-                    output_audio = output_audio[np.newaxis, ...]
-                    output = DataBundle(output_definition)
-                    output.set_main_data(output_audio)
-                    output.add_meta("avatar_speech_end", False)
-                    output.add_meta("speech_id", speech_id)
-                    context.submit_data(output)
+                        logger.info("Starting Edge TTS stream_sync()...")
+                        for chunk in communicate.stream_sync():
+                            chunk_count += 1
+                            if chunk['type'] == 'audio':
+                                # tts_audio = chunk['data']
+                                data += chunk['data']
+                        
+                        logger.info(f"Edge TTS stream completed: {chunk_count} chunks, {len(data)} bytes of audio")
+                        if len(data) == 0:
+                            logger.warning(f"Edge TTS generated no audio data for sentence: {sentence}")
+                            continue
+                        
+                        output_audio, orig_sr = librosa.load(io.BytesIO(data), sr=None)
+                        # Resample to target sample rate if needed
+                        if orig_sr != self.sample_rate:
+                            output_audio = librosa.resample(output_audio, orig_sr=orig_sr, target_sr=self.sample_rate)
+                        output_audio = output_audio[np.newaxis, ...]
+                        output = DataBundle(output_definition)
+                        output.set_main_data(output_audio)
+                        output.add_meta("avatar_speech_end", False)
+                        output.add_meta("speech_id", speech_id)
+                        logger.info(f"Edge TTS generated audio: shape={output_audio.shape}, sample_rate={self.sample_rate}, orig_sr={orig_sr}, data_len={len(data)}")
+                        context.submit_data(output)
+                    except Exception as e:
+                        logger.error(f"Error in Edge TTS generation for sentence '{sentence}': {e}", exc_info=True)
         else:
-            logger.info('last sentence' + context.input_text)
+            logger.info('last sentence: ' + context.input_text)
             if context.input_text is not None and len(context.input_text.strip()) > 0:
-                    communicate = edge_tts.Communicate(context.input_text, self.voice)
-                    data = b''
+                    try:
+                        logger.info(f"Calling Edge TTS (final) with voice: {self.voice}")
+                        communicate = edge_tts.Communicate(context.input_text, self.voice)
+                        data = b''
+                        chunk_count = 0
 
-                    for chunk in communicate.stream_sync():
-                        if chunk['type'] == 'audio':
-                            # tts_audio = chunk['data']
-                            data += chunk['data']
-                    output_audio = librosa.load(io.BytesIO(data), sr=None)[0]
-                    output_audio = output_audio[np.newaxis, ...]
-                    output = DataBundle(output_definition)
-                    output.set_main_data(output_audio)
-                    output.add_meta("avatar_speech_end", False)
-                    output.add_meta("speech_id", speech_id)
-                    context.submit_data(output)
+                        logger.info("Starting Edge TTS stream_sync() (final)...")
+                        for chunk in communicate.stream_sync():
+                            chunk_count += 1
+                            if chunk['type'] == 'audio':
+                                # tts_audio = chunk['data']
+                                data += chunk['data']
+                        
+                        logger.info(f"Edge TTS stream completed (final): {chunk_count} chunks, {len(data)} bytes of audio")
+                        if len(data) == 0:
+                            logger.warning(f"Edge TTS generated no audio data for final sentence: {context.input_text}")
+                        else:
+                            output_audio, orig_sr = librosa.load(io.BytesIO(data), sr=None)
+                            # Resample to target sample rate if needed
+                            if orig_sr != self.sample_rate:
+                                output_audio = librosa.resample(output_audio, orig_sr=orig_sr, target_sr=self.sample_rate)
+                            output_audio = output_audio[np.newaxis, ...]
+                            output = DataBundle(output_definition)
+                            output.set_main_data(output_audio)
+                            output.add_meta("avatar_speech_end", False)
+                            output.add_meta("speech_id", speech_id)
+                            logger.info(f"Edge TTS generated audio (final): shape={output_audio.shape}, sample_rate={self.sample_rate}, orig_sr={orig_sr}, data_len={len(data)}")
+                            context.submit_data(output)
+                    except Exception as e:
+                        logger.error(f"Error in Edge TTS generation for final sentence '{context.input_text}': {e}", exc_info=True)
             context.input_text = ''
             output = DataBundle(output_definition)
             output.set_main_data(np.zeros(shape=(1, 240), dtype=np.float32))

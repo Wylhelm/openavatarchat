@@ -66,13 +66,17 @@ class TTSCosyVoiceProcessor(spawn_context.Process):
                     raise TypeError('no valid model_type!')
             self.model.sample_rate = self.sample_rate
             if self.ref_audio_path:
-                self.ref_audio_buffer = load_wav(self.ref_audio_path, self.sample_rate)
-                self.ref_audio_text = self.ref_audio_text
+                # CosyVoice expects reference audio at 16kHz
+                self.ref_audio_buffer = load_wav(self.ref_audio_path, 16000)
+                # Try without language tags - CosyVoice2 might handle French better without explicit tags
+                # if self.ref_audio_text and not self.ref_audio_text.startswith('<|'):
+                #     self.ref_audio_text = '<|fr|>' + self.ref_audio_text
             init_text = '欢迎来到中国2025'
             response = None
             if self.ref_audio_buffer is not None:
+                # Use text_frontend=False to skip English normalization for multilingual text
                 response = self.model.inference_zero_shot(
-                    init_text, self.ref_audio_text, self.ref_audio_buffer, True)
+                    init_text, self.ref_audio_text, self.ref_audio_buffer, '', False, text_frontend=False)
             elif self.spk_id:
                 response = self.model.inference_sft(init_text, self.spk_id)
             else:
@@ -140,8 +144,9 @@ class TTSCosyVoiceProcessor(spawn_context.Process):
                 response = None
                 if self.model:
                     if self.ref_audio_buffer is not None:
+                        # Use text_frontend=False to skip English normalization for multilingual text
                         response = self.model.inference_zero_shot(
-                            input_text, self.ref_audio_text, self.ref_audio_buffer, stream=True)
+                            input_text, self.ref_audio_text, self.ref_audio_buffer, '', stream=True, text_frontend=False)
                     elif self.spk_id:
                         response = self.model.inference_sft(input_text, self.spk_id, stream=True)
                     else:

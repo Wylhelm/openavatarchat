@@ -157,6 +157,7 @@ class HandlerAvatarLAM(HandlerBase):
         speech_text = inputs.data.get_meta("avatar_speech_text")
 
         audio = inputs.data.get_main_data()
+        logger.info(f"LAM handler received audio: shape={audio.shape if audio is not None else None}, speech_id={speech_id}, speech_end={speech_end}")
         audio_segments = queue.Queue()
         for audio_segment in slice_data(context.input_slice_context, audio.squeeze()):
             audio_segments.put_nowait(audio_segment)

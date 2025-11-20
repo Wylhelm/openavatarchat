@@ -214,7 +214,8 @@ class HandlerTTS(HandlerBase, ABC):
             speech_id = context.session_id
 
         if text is not None:
-            text = re.sub(r"<\|.*?\|>", "", text)
+            # Don't strip language tags - they're needed for multilingual support
+            # text = re.sub(r"<\|.*?\|>", "", text)
             context.input_text += self.filter_text(text)
 
         text_end = inputs.data.get_meta("avatar_text_end", False)
@@ -230,8 +231,15 @@ class HandlerTTS(HandlerBase, ABC):
                         continue
                     logger.info('current sentence' + sentence)
                     task = HandlerTask(speech_id=speech_id)
+                    # Try without language tags - CosyVoice2 might handle French better without explicit tags
+                    # if self.ref_audio_path and not sentence.startswith('<|'):
+                    #     sentence = '<|fr|>' + sentence
+                    # Don't add Chinese punctuation for French text
+                    # Only add punctuation if it doesn't already end with punctuation
+                    if not sentence.rstrip().endswith(('.', '!', '?', '。', '！', '？')):
+                        sentence = sentence + '.'
                     tts_info = {
-                        "text": sentence + '。',
+                        "text": sentence,
                         "key": task.id,
                         "session_id": context.session_id
                     
@@ -242,8 +250,12 @@ class HandlerTTS(HandlerBase, ABC):
             logger.info('last sentence' + context.input_text)
             if context.input_text is not None and len(context.input_text.strip()) > 0:
                 task = HandlerTask(speech_id=speech_id)
+                # Try without language tags - CosyVoice2 might handle French better without explicit tags
+                final_text = context.input_text
+                # if self.ref_audio_path and not final_text.startswith('<|'):
+                #     final_text = '<|fr|>' + final_text
                 tts_info = {
-                    "text": context.input_text,
+                    "text": final_text,
                     "key": task.id,
                     "session_id": context.session_id
                 }

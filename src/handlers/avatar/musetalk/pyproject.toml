@@ -18,7 +18,7 @@ dependencies = [
     "imageio[ffmpeg]>=2.37.0",
     "librosa==0.10.2",
     "moviepy>=1.0.3",
-    "numpy==1.23.5",
+    "numpy>=1.23.5,<1.27.0",
     "omegaconf>=2.3.0",
     "opencv-python==4.9.0.80",
     "requests>=2.32.3",

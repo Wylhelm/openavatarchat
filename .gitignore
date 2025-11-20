@@ -38,3 +38,5 @@ exp/
 uv.lock
 logs/
 .lock
+temp_lam_download/
+dump_talk_audio_*.pcm

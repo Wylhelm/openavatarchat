@@ -38,6 +38,7 @@ dependencies = [
 members = [
     "src/handlers/tts/edgetts",
     "src/handlers/tts/cosyvoice",
+    "src/handlers/tts/xtts",
     "src/handlers/llm/minicpm",
     "src/handlers/avatar/liteavatar",
     "src/handlers/avatar/lam",

@@ -1,0 +1,1007 @@
+{
+    "cx": 512.0,
+    "cy": 512.0,
+    "fl_x": 512.0,
+    "fl_y": 512.0,
+    "h": 1024,
+    "w": 1024,
+    "camera_angle_x": 1.5707963267948966,
+    "camera_angle_y": 1.5707963267948966,
+    "frames": [
+        {
+            "timestep_index": 54,
+            "timestep_index_original": 54,
+            "timestep_id": "00000054",
+            "camera_index": 0,
+            "camera_id": "0",
+            "cx": 512.0,
+            "cy": 512.0,
+            "fl_x": 2555.90625,
+            "fl_y": 2555.90625,
+            "h": 1024,
+            "w": 1024,
+            "camera_angle_x": 0.3954071134168967,
+            "camera_angle_y": 0.3954071134168967,
+            "transform_matrix": [
+                [
+                    1.0,
+                    0.0,
+                    0.0,
+                    0.009751531295478344
+                ],
+                [
+                    0.0,
+                    1.0,
+                    0.0,
+                    -0.02500234544277191
+                ],
+                [
+                    0.0,
+                    0.0,
+                    1.0,
+                    0.7618947476148605
+                ],
+                [
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0
+                ]
+            ],
+            "file_path": "images/00054_00.png",
+            "fg_mask_path": "fg_masks/00054_00.png",
+            "flame_param_path": "flame_param/00054.npz"
+        },
+        {
+            "timestep_index": 55,
+            "timestep_index_original": 55,
+            "timestep_id": "00000055",
+            "camera_index": 0,
+            "camera_id": "0",
+            "cx": 512.0,
+            "cy": 512.0,
+            "fl_x": 2555.90625,
+            "fl_y": 2555.90625,
+            "h": 1024,
+            "w": 1024,
+            "camera_angle_x": 0.3954071134168967,
+            "camera_angle_y": 0.3954071134168967,
+            "transform_matrix": [
+                [
+                    1.0,
+                    0.0,
+                    0.0,
+                    0.009751531295478344
+                ],
+                [
+                    0.0,
+                    1.0,
+                    0.0,
+                    -0.02500234544277191
+                ],
+                [
+                    0.0,
+                    0.0,
+                    1.0,
+                    0.7618947476148605
+                ],
+                [
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0
+                ]
+            ],
+            "file_path": "images/00055_00.png",
+            "fg_mask_path": "fg_masks/00055_00.png",
+            "flame_param_path": "flame_param/00055.npz"
+        },
+        {
+            "timestep_index": 56,
+            "timestep_index_original": 56,
+            "timestep_id": "00000056",
+            "camera_index": 0,
+            "camera_id": "0",
+            "cx": 512.0,
+            "cy": 512.0,
+            "fl_x": 2555.90625,
+            "fl_y": 2555.90625,
+            "h": 1024,
+            "w": 1024,
+            "camera_angle_x": 0.3954071134168967,
+            "camera_angle_y": 0.3954071134168967,
+            "transform_matrix": [
+                [
+                    1.0,
+                    0.0,
+                    0.0,
+                    0.009751531295478344
+                ],
+                [
+                    0.0,
+                    1.0,
+                    0.0,
+                    -0.02500234544277191
+                ],
+                [
+                    0.0,
+                    0.0,
+                    1.0,
+                    0.7618947476148605
+                ],
+                [
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0
+                ]
+            ],
+            "file_path": "images/00056_00.png",
+            "fg_mask_path": "fg_masks/00056_00.png",
+            "flame_param_path": "flame_param/00056.npz"
+        },
+        {
+            "timestep_index": 57,
+            "timestep_index_original": 57,
+            "timestep_id": "00000057",
+            "camera_index": 0,
+            "camera_id": "0",
+            "cx": 512.0,
+            "cy": 512.0,
+            "fl_x": 2555.90625,
+            "fl_y": 2555.90625,
+            "h": 1024,
+            "w": 1024,
+            "camera_angle_x": 0.3954071134168967,
+            "camera_angle_y": 0.3954071134168967,
+            "transform_matrix": [
+                [
+                    1.0,
+                    0.0,
+                    0.0,
+                    0.009751531295478344
+                ],
+                [
+                    0.0,
+                    1.0,
+                    0.0,
+                    -0.02500234544277191
+                ],
+                [
+                    0.0,
+                    0.0,
+                    1.0,
+                    0.7618947476148605
+                ],
+                [
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0
+                ]
+            ],
+            "file_path": "images/00057_00.png",
+            "fg_mask_path": "fg_masks/00057_00.png",
+            "flame_param_path": "flame_param/00057.npz"
+        },
+        {
+            "timestep_index": 58,
+            "timestep_index_original": 58,
+            "timestep_id": "00000058",
+            "camera_index": 0,
+            "camera_id": "0",
+            "cx": 512.0,
+            "cy": 512.0,
+            "fl_x": 2555.90625,
+            "fl_y": 2555.90625,
+            "h": 1024,
+            "w": 1024,
+            "camera_angle_x": 0.3954071134168967,
+            "camera_angle_y": 0.3954071134168967,
+            "transform_matrix": [
+                [
+                    1.0,
+                    0.0,
+                    0.0,
+                    0.009751531295478344
+                ],
+                [
+                    0.0,
+                    1.0,
+                    0.0,
+                    -0.02500234544277191
+                ],
+                [
+                    0.0,
+                    0.0,
+                    1.0,
+                    0.7618947476148605
+                ],
+                [
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0
+                ]
+            ],
+            "file_path": "images/00058_00.png",
+            "fg_mask_path": "fg_masks/00058_00.png",
+            "flame_param_path": "flame_param/00058.npz"
+        },
+        {
+            "timestep_index": 59,
+            "timestep_index_original": 59,
+            "timestep_id": "00000059",
+            "camera_index": 0,
+            "camera_id": "0",
+            "cx": 512.0,
+            "cy": 512.0,
+            "fl_x": 2555.90625,
+            "fl_y": 2555.90625,
+            "h": 1024,
+            "w": 1024,
+            "camera_angle_x": 0.3954071134168967,
+            "camera_angle_y": 0.3954071134168967,
+            "transform_matrix": [
+                [
+                    1.0,
+                    0.0,
+                    0.0,
+                    0.009751531295478344
+                ],
+                [
+                    0.0,
+                    1.0,
+                    0.0,
+                    -0.02500234544277191
+                ],
+                [
+                    0.0,
+                    0.0,
+                    1.0,
+                    0.7618947476148605
+                ],
+                [
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0
+                ]
+            ],
+            "file_path": "images/00059_00.png",
+            "fg_mask_path": "fg_masks/00059_00.png",
+            "flame_param_path": "flame_param/00059.npz"
+        },
+        {
+            "timestep_index": 60,
+            "timestep_index_original": 60,
+            "timestep_id": "00000060",
+            "camera_index": 0,
+            "camera_id": "0",
+            "cx": 512.0,
+            "cy": 512.0,
+            "fl_x": 2555.90625,
+            "fl_y": 2555.90625,
+            "h": 1024,
+            "w": 1024,
+            "camera_angle_x": 0.3954071134168967,
+            "camera_angle_y": 0.3954071134168967,
+            "transform_matrix": [
+                [
+                    1.0,
+                    0.0,
+                    0.0,
+                    0.009751531295478344
+                ],
+                [
+                    0.0,
+                    1.0,
+                    0.0,
+                    -0.02500234544277191
+                ],
+                [
+                    0.0,
+                    0.0,
+                    1.0,
+                    0.7618947476148605
+                ],
+                [
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0
+                ]
+            ],
+            "file_path": "images/00060_00.png",
+            "fg_mask_path": "fg_masks/00060_00.png",
+            "flame_param_path": "flame_param/00060.npz"
+        },
+        {
+            "timestep_index": 61,
+            "timestep_index_original": 61,
+            "timestep_id": "00000061",
+            "camera_index": 0,
+            "camera_id": "0",
+            "cx": 512.0,
+            "cy": 512.0,
+            "fl_x": 2555.90625,
+            "fl_y": 2555.90625,
+            "h": 1024,
+            "w": 1024,
+            "camera_angle_x": 0.3954071134168967,
+            "camera_angle_y": 0.3954071134168967,
+            "transform_matrix": [
+                [
+                    1.0,
+                    0.0,
+                    0.0,
+                    0.009751531295478344
+                ],
+                [
+                    0.0,
+                    1.0,
+                    0.0,
+                    -0.02500234544277191
+                ],
+                [
+                    0.0,
+                    0.0,
+                    1.0,
+                    0.7618947476148605
+                ],
+                [
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0
+                ]
+            ],
+            "file_path": "images/00061_00.png",
+            "fg_mask_path": "fg_masks/00061_00.png",
+            "flame_param_path": "flame_param/00061.npz"
+        },
+        {
+            "timestep_index": 62,
+            "timestep_index_original": 62,
+            "timestep_id": "00000062",
+            "camera_index": 0,
+            "camera_id": "0",
+            "cx": 512.0,
+            "cy": 512.0,
+            "fl_x": 2555.90625,
+            "fl_y": 2555.90625,
+            "h": 1024,
+            "w": 1024,
+            "camera_angle_x": 0.3954071134168967,
+            "camera_angle_y": 0.3954071134168967,
+            "transform_matrix": [
+                [
+                    1.0,
+                    0.0,
+                    0.0,
+                    0.009751531295478344
+                ],
+                [
+                    0.0,
+                    1.0,
+                    0.0,
+                    -0.02500234544277191
+                ],
+                [
+                    0.0,
+                    0.0,
+                    1.0,
+                    0.7618947476148605
+                ],
+                [
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0
+                ]
+            ],
+            "file_path": "images/00062_00.png",
+            "fg_mask_path": "fg_masks/00062_00.png",
+            "flame_param_path": "flame_param/00062.npz"
+        },
+        {
+            "timestep_index": 63,
+            "timestep_index_original": 63,
+            "timestep_id": "00000063",
+            "camera_index": 0,
+            "camera_id": "0",
+            "cx": 512.0,
+            "cy": 512.0,
+            "fl_x": 2555.90625,
+            "fl_y": 2555.90625,
+            "h": 1024,
+            "w": 1024,
+            "camera_angle_x": 0.3954071134168967,
+            "camera_angle_y": 0.3954071134168967,
+            "transform_matrix": [
+                [
+                    1.0,
+                    0.0,
+                    0.0,
+                    0.009751531295478344
+                ],
+                [
+                    0.0,
+                    1.0,
+                    0.0,
+                    -0.02500234544277191
+                ],
+                [
+                    0.0,
+                    0.0,
+                    1.0,
+                    0.7618947476148605
+                ],
+                [
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0
+                ]
+            ],
+            "file_path": "images/00063_00.png",
+            "fg_mask_path": "fg_masks/00063_00.png",
+            "flame_param_path": "flame_param/00063.npz"
+        },
+        {
+            "timestep_index": 64,
+            "timestep_index_original": 64,
+            "timestep_id": "00000064",
+            "camera_index": 0,
+            "camera_id": "0",
+            "cx": 512.0,
+            "cy": 512.0,
+            "fl_x": 2555.90625,
+            "fl_y": 2555.90625,
+            "h": 1024,
+            "w": 1024,
+            "camera_angle_x": 0.3954071134168967,
+            "camera_angle_y": 0.3954071134168967,
+            "transform_matrix": [
+                [
+                    1.0,
+                    0.0,
+                    0.0,
+                    0.009751531295478344
+                ],
+                [
+                    0.0,
+                    1.0,
+                    0.0,
+                    -0.02500234544277191
+                ],
+                [
+                    0.0,
+                    0.0,
+                    1.0,
+                    0.7618947476148605
+                ],
+                [
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0
+                ]
+            ],
+            "file_path": "images/00064_00.png",
+            "fg_mask_path": "fg_masks/00064_00.png",
+            "flame_param_path": "flame_param/00064.npz"
+        },
+        {
+            "timestep_index": 65,
+            "timestep_index_original": 65,
+            "timestep_id": "00000065",
+            "camera_index": 0,
+            "camera_id": "0",
+            "cx": 512.0,
+            "cy": 512.0,
+            "fl_x": 2555.90625,
+            "fl_y": 2555.90625,
+            "h": 1024,
+            "w": 1024,
+            "camera_angle_x": 0.3954071134168967,
+            "camera_angle_y": 0.3954071134168967,
+            "transform_matrix": [
+                [
+                    1.0,
+                    0.0,
+                    0.0,
+                    0.009751531295478344
+                ],
+                [
+                    0.0,
+                    1.0,
+                    0.0,
+                    -0.02500234544277191
+                ],
+                [
+                    0.0,
+                    0.0,
+                    1.0,
+                    0.7618947476148605
+                ],
+                [
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0
+                ]
+            ],
+            "file_path": "images/00065_00.png",
+            "fg_mask_path": "fg_masks/00065_00.png",
+            "flame_param_path": "flame_param/00065.npz"
+        },
+        {
+            "timestep_index": 66,
+            "timestep_index_original": 66,
+            "timestep_id": "00000066",
+            "camera_index": 0,
+            "camera_id": "0",
+            "cx": 512.0,
+            "cy": 512.0,
+            "fl_x": 2555.90625,
+            "fl_y": 2555.90625,
+            "h": 1024,
+            "w": 1024,
+            "camera_angle_x": 0.3954071134168967,
+            "camera_angle_y": 0.3954071134168967,
+            "transform_matrix": [
+                [
+                    1.0,
+                    0.0,
+                    0.0,
+                    0.009751531295478344
+                ],
+                [
+                    0.0,
+                    1.0,
+                    0.0,
+                    -0.02500234544277191
+                ],
+                [
+                    0.0,
+                    0.0,
+                    1.0,
+                    0.7618947476148605
+                ],
+                [
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0
+                ]
+            ],
+            "file_path": "images/00066_00.png",
+            "fg_mask_path": "fg_masks/00066_00.png",
+            "flame_param_path": "flame_param/00066.npz"
+        },
+        {
+            "timestep_index": 67,
+            "timestep_index_original": 67,
+            "timestep_id": "00000067",
+            "camera_index": 0,
+            "camera_id": "0",
+            "cx": 512.0,
+            "cy": 512.0,
+            "fl_x": 2555.90625,
+            "fl_y": 2555.90625,
+            "h": 1024,
+            "w": 1024,
+            "camera_angle_x": 0.3954071134168967,
+            "camera_angle_y": 0.3954071134168967,
+            "transform_matrix": [
+                [
+                    1.0,
+                    0.0,
+                    0.0,
+                    0.009751531295478344
+                ],
+                [
+                    0.0,
+                    1.0,
+                    0.0,
+                    -0.02500234544277191
+                ],
+                [
+                    0.0,
+                    0.0,
+                    1.0,
+                    0.7618947476148605
+                ],
+                [
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0
+                ]
+            ],
+            "file_path": "images/00067_00.png",
+            "fg_mask_path": "fg_masks/00067_00.png",
+            "flame_param_path": "flame_param/00067.npz"
+        },
+        {
+            "timestep_index": 68,
+            "timestep_index_original": 68,
+            "timestep_id": "00000068",
+            "camera_index": 0,
+            "camera_id": "0",
+            "cx": 512.0,
+            "cy": 512.0,
+            "fl_x": 2555.90625,
+            "fl_y": 2555.90625,
+            "h": 1024,
+            "w": 1024,
+            "camera_angle_x": 0.3954071134168967,
+            "camera_angle_y": 0.3954071134168967,
+            "transform_matrix": [
+                [
+                    1.0,
+                    0.0,
+                    0.0,
+                    0.009751531295478344
+                ],
+                [
+                    0.0,
+                    1.0,
+                    0.0,
+                    -0.02500234544277191
+                ],
+                [
+                    0.0,
+                    0.0,
+                    1.0,
+                    0.7618947476148605
+                ],
+                [
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0
+                ]
+            ],
+            "file_path": "images/00068_00.png",
+            "fg_mask_path": "fg_masks/00068_00.png",
+            "flame_param_path": "flame_param/00068.npz"
+        },
+        {
+            "timestep_index": 69,
+            "timestep_index_original": 69,
+            "timestep_id": "00000069",
+            "camera_index": 0,
+            "camera_id": "0",
+            "cx": 512.0,
+            "cy": 512.0,
+            "fl_x": 2555.90625,
+            "fl_y": 2555.90625,
+            "h": 1024,
+            "w": 1024,
+            "camera_angle_x": 0.3954071134168967,
+            "camera_angle_y": 0.3954071134168967,
+            "transform_matrix": [
+                [
+                    1.0,
+                    0.0,
+                    0.0,
+                    0.009751531295478344
+                ],
+                [
+                    0.0,
+                    1.0,
+                    0.0,
+                    -0.02500234544277191
+                ],
+                [
+                    0.0,
+                    0.0,
+                    1.0,
+                    0.7618947476148605
+                ],
+                [
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0
+                ]
+            ],
+            "file_path": "images/00069_00.png",
+            "fg_mask_path": "fg_masks/00069_00.png",
+            "flame_param_path": "flame_param/00069.npz"
+        },
+        {
+            "timestep_index": 70,
+            "timestep_index_original": 70,
+            "timestep_id": "00000070",
+            "camera_index": 0,
+            "camera_id": "0",
+            "cx": 512.0,
+            "cy": 512.0,
+            "fl_x": 2555.90625,
+            "fl_y": 2555.90625,
+            "h": 1024,
+            "w": 1024,
+            "camera_angle_x": 0.3954071134168967,
+            "camera_angle_y": 0.3954071134168967,
+            "transform_matrix": [
+                [
+                    1.0,
+                    0.0,
+                    0.0,
+                    0.009751531295478344
+                ],
+                [
+                    0.0,
+                    1.0,
+                    0.0,
+                    -0.02500234544277191
+                ],
+                [
+                    0.0,
+                    0.0,
+                    1.0,
+                    0.7618947476148605
+                ],
+                [
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0
+                ]
+            ],
+            "file_path": "images/00070_00.png",
+            "fg_mask_path": "fg_masks/00070_00.png",
+            "flame_param_path": "flame_param/00070.npz"
+        },
+        {
+            "timestep_index": 71,
+            "timestep_index_original": 71,
+            "timestep_id": "00000071",
+            "camera_index": 0,
+            "camera_id": "0",
+            "cx": 512.0,
+            "cy": 512.0,
+            "fl_x": 2555.90625,
+            "fl_y": 2555.90625,
+            "h": 1024,
+            "w": 1024,
+            "camera_angle_x": 0.3954071134168967,
+            "camera_angle_y": 0.3954071134168967,
+            "transform_matrix": [
+                [
+                    1.0,
+                    0.0,
+                    0.0,
+                    0.009751531295478344
+                ],
+                [
+                    0.0,
+                    1.0,
+                    0.0,
+                    -0.02500234544277191
+                ],
+                [
+                    0.0,
+                    0.0,
+                    1.0,
+                    0.7618947476148605
+                ],
+                [
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0
+                ]
+            ],
+            "file_path": "images/00071_00.png",
+            "fg_mask_path": "fg_masks/00071_00.png",
+            "flame_param_path": "flame_param/00071.npz"
+        },
+        {
+            "timestep_index": 72,
+            "timestep_index_original": 72,
+            "timestep_id": "00000072",
+            "camera_index": 0,
+            "camera_id": "0",
+            "cx": 512.0,
+            "cy": 512.0,
+            "fl_x": 2555.90625,
+            "fl_y": 2555.90625,
+            "h": 1024,
+            "w": 1024,
+            "camera_angle_x": 0.3954071134168967,
+            "camera_angle_y": 0.3954071134168967,
+            "transform_matrix": [
+                [
+                    1.0,
+                    0.0,
+                    0.0,
+                    0.009751531295478344
+                ],
+                [
+                    0.0,
+                    1.0,
+                    0.0,
+                    -0.02500234544277191
+                ],
+                [
+                    0.0,
+                    0.0,
+                    1.0,
+                    0.7618947476148605
+                ],
+                [
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0
+                ]
+            ],
+            "file_path": "images/00072_00.png",
+            "fg_mask_path": "fg_masks/00072_00.png",
+            "flame_param_path": "flame_param/00072.npz"
+        },
+        {
+            "timestep_index": 73,
+            "timestep_index_original": 73,
+            "timestep_id": "00000073",
+            "camera_index": 0,
+            "camera_id": "0",
+            "cx": 512.0,
+            "cy": 512.0,
+            "fl_x": 2555.90625,
+            "fl_y": 2555.90625,
+            "h": 1024,
+            "w": 1024,
+            "camera_angle_x": 0.3954071134168967,
+            "camera_angle_y": 0.3954071134168967,
+            "transform_matrix": [
+                [
+                    1.0,
+                    0.0,
+                    0.0,
+                    0.009751531295478344
+                ],
+                [
+                    0.0,
+                    1.0,
+                    0.0,
+                    -0.02500234544277191
+                ],
+                [
+                    0.0,
+                    0.0,
+                    1.0,
+                    0.7618947476148605
+                ],
+                [
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0
+                ]
+            ],
+            "file_path": "images/00073_00.png",
+            "fg_mask_path": "fg_masks/00073_00.png",
+            "flame_param_path": "flame_param/00073.npz"
+        },
+        {
+            "timestep_index": 74,
+            "timestep_index_original": 74,
+            "timestep_id": "00000074",
+            "camera_index": 0,
+            "camera_id": "0",
+            "cx": 512.0,
+            "cy": 512.0,
+            "fl_x": 2555.90625,
+            "fl_y": 2555.90625,
+            "h": 1024,
+            "w": 1024,
+            "camera_angle_x": 0.3954071134168967,
+            "camera_angle_y": 0.3954071134168967,
+            "transform_matrix": [
+                [
+                    1.0,
+                    0.0,
+                    0.0,
+                    0.009751531295478344
+                ],
+                [
+                    0.0,
+                    1.0,
+                    0.0,
+                    -0.02500234544277191
+                ],
+                [
+                    0.0,
+                    0.0,
+                    1.0,
+                    0.7618947476148605
+                ],
+                [
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0
+                ]
+            ],
+            "file_path": "images/00074_00.png",
+            "fg_mask_path": "fg_masks/00074_00.png",
+            "flame_param_path": "flame_param/00074.npz"
+        },
+        {
+            "timestep_index": 75,
+            "timestep_index_original": 75,
+            "timestep_id": "00000075",
+            "camera_index": 0,
+            "camera_id": "0",
+            "cx": 512.0,
+            "cy": 512.0,
+            "fl_x": 2555.90625,
+            "fl_y": 2555.90625,
+            "h": 1024,
+            "w": 1024,
+            "camera_angle_x": 0.3954071134168967,
+            "camera_angle_y": 0.3954071134168967,
+            "transform_matrix": [
+                [
+                    1.0,
+                    0.0,
+                    0.0,
+                    0.009751531295478344
+                ],
+                [
+                    0.0,
+                    1.0,
+                    0.0,
+                    -0.02500234544277191
+                ],
+                [
+                    0.0,
+                    0.0,
+                    1.0,
+                    0.7618947476148605
+                ],
+                [
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0
+                ]
+            ],
+            "file_path": "images/00075_00.png",
+            "fg_mask_path": "fg_masks/00075_00.png",
+            "flame_param_path": "flame_param/00075.npz"
+        }
+    ],
+    "timestep_indices": [
+        54,
+        55,
+        56,
+        57,
+        58,
+        59,
+        60,
+        61,
+        62,
+        63,
+        64,
+        65,
+        66,
+        67,
+        68,
+        69,
+        70,
+        71,
+        72,
+        73,
+        74,
+        75
+    ],
+    "camera_indices": [
+        0
+    ]
+}

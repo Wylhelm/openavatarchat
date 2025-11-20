@@ -1,0 +1,11 @@
+[project]
+name = "xtts-tts-handler"
+version = "0.1.0"
+description = "XTTS TTS Handler for OpenAvatarChat"
+requires-python = ">=3.11.7, <3.12"
+dependencies = [
+    "TTS>=0.22.0",
+    "librosa>=0.10.0",
+    "numpy>=1.21.0",
+]
+

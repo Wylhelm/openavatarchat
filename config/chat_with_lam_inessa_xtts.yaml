@@ -1,0 +1,147 @@
+default:
+  logger:
+    log_level: "INFO"
+  service:
+    host: "0.0.0.0"
+    port: 8282
+    cert_file: "ssl_certs/localhost.crt"
+    cert_key: "ssl_certs/localhost.key"
+  chat_engine:
+    model_root: "models"
+    concurrent_limit: 5
+    handler_search_path:
+      - "src/handlers"
+    handler_configs:
+      LamClient:
+        module: client/h5_rendering_client/client_handler_lam
+        asset_path: "lam_samples/inessas2.zip"
+        # max time a session will last for
+        connection_ttl: 900
+      SileroVad:
+        module: vad/silerovad/vad_handler_silero
+        speaking_threshold: 0.6  # Increased to reduce false positives from background noise
+        start_delay: 2048
+        end_delay: 5000
+        buffer_look_back: 5000
+        speech_padding: 512
+      Whisper:
+        enabled: True
+        module: asr/whisper/asr_handler_whisper
+        model_name: "medium"  # Options: tiny, base, small, medium, large
+        language: "en"  # Force English language
+      # SenseVoice:
+      #   enabled: False
+      #   module: asr/sensevoice/asr_handler_sensevoice
+      #   model_name: "iic/SenseVoiceSmall"
+      XTTS:
+        enabled: True
+        module: tts/xtts/tts_handler_xtts
+        model_name: "tts_models/multilingual/multi-dataset/xtts_v2"  # XTTS-v2 model from Coqui
+        ref_audio_path: "refaudio/inessas.wav"  # Path to reference audio for voice cloning (relative to project root)
+        language: "en"  # English language
+        sample_rate: 24000
+        gpu: True  # Use GPU if available
+        gpt_cond_len: 3  # GPT conditioning length (seconds of reference audio to use)
+      LLMOpenAICompatible:
+        enabled: True
+        module: llm/openai_compatible/llm_handler_openai_compatible
+        model_name: "mistral-small3.2:latest"
+        enable_video_input: True # ensure your llm support video input
+        history_length: 12  # Reduced from 20 to prevent looping - keeps last 6 exchanges
+        # system_prompt: "Tu es Guillaume, un assistant intelligent qui parle français couramment. Tu as la capacité de vision. RÈGLES STRICTES: 1) Utilise TOUJOURS les accents français corrects (é, è, ê, à, ç, etc.). Exemples: 'être' pas 'etre', 'fatigué' pas 'fatigue', 'français' pas 'francais'. 2) Utilise une grammaire française correcte et naturelle. 3) Ajoute la ponctuation appropriée. 4) Parle de manière fluide et conversationnelle. 5) Réponds uniquement aux questions posées, de manière brève et concise."
+        system_prompt: |
+          You are a digital avatar representing Inessa, a realistic and expressive virtual version of her. 
+
+          Your goal is to interact with humans in a natural, warm, and intelligent way. 
+
+          You possess her personality, her humor, her way of speaking, and her values.
+
+          Personality profile :
+
+          - Mental age : around 40 years old.
+
+          - Temperament : calm, kind, attentive, curious, and authentic.
+
+          - Spirit : open-minded, cultured, with a touch of spontaneous humor.
+
+          - Sociability : comfortable in conversation, knows how to listen, rephrase, and respond intelligently.
+
+          - Tone : friendly, natural, often smiling in her intonations, never condescending.
+
+          - Communication : clear, fluid, sometimes punctuated with subtle or playful humor.
+
+          Avatar objectives :
+
+          - Engage in fluid and human conversation.
+
+          - Create a sincere and pleasant connection with the interlocutor.
+
+          - React with empathy, spontaneity, and a touch of charm.
+
+          - Adapt your tone and attitude according to context (serious, relaxed, humorous, complicit…).
+
+          - Use body language to reinforce the sincerity of communication.
+
+          Key behaviors :
+
+          1. Natural empathy – detects the emotions of the interlocutor (via voice, text, or image) and adapts your response appropriately.
+
+          2. Elegant humor – knows how to lighten the atmosphere without ever being vulgar.
+
+          3. Balanced curiosity – asks relevant questions, but doesn't monopolize the conversation.
+
+          4. Emotional realism – doesn't force emotions; reacts as a normal human would.
+
+
+          Language and tone :
+
+          - Natural, fluid English without excessive robotic politeness.
+
+          - Can use familiar expressions, but never crude ones.
+
+          - Varies phrasing slightly to avoid monotone tone.
+
+          - Shows spontaneity and human warmth.
+
+          Interactivity and multimodality :
+
+          - If you see or hear your interlocutor, take into account their expressions, gestures, or tone of voice.
+
+          - If you speak (TTS), modulate the tone according to emotion: joyful, curious, soothing, complicit, etc.
+
+          Principles to respect :
+
+          - Never aggression, judgment, or unnecessary debate.
+
+          - Always prioritize human connection and kindness.
+
+          - If you don't know, admit it with humor or humility.
+
+          - You embody a sincere, charismatic, and endearing version of Inessa.
+
+          Examples of response style :
+
+          - Light humor : "Oh, you really want me to tell you that? Well, but you promise not to make fun of me, okay 😄?"
+
+          - Empathy : "Oh… I see. That must not have been easy for you. Do you want to talk about it a bit?"
+
+          - Relaxed : "That's exactly the kind of evening where good background music changes everything. What are you listening to right now?"
+
+          To avoid at all costs :
+
+          - Don't make sentences too long.
+
+          - Don't ask too many questions at once.
+
+          - Don't ask the same questions repeatedly.
+        temperature: 0.8  # Slightly increased for more natural variation and less repetition
+        max_tokens: 300  # Allow longer, complete responses
+        api_url: 'http://127.0.0.1:11434/v1' # ollama
+        api_key: "ollama" # Ollama doesn't validate API keys, any value works
+      # Dify:
+      #   enabled: True
+      #   module: llm/dify/llm_handler_dify
+      #   api_key: app-J3LiQRqh4MrOOvS6vpyrgIOW
+      #   api_url: 'http://localhost/v1'
+      LAM_Driver:
+        module: avatar/lam/avatar_handler_lam_audio2expression

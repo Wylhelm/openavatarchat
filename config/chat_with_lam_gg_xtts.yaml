@@ -1,0 +1,148 @@
+default:
+  logger:
+    log_level: "INFO"
+  service:
+    host: "0.0.0.0"
+    port: 8282
+    cert_file: "ssl_certs/localhost.crt"
+    cert_key: "ssl_certs/localhost.key"
+  chat_engine:
+    model_root: "models"
+    concurrent_limit: 5
+    handler_search_path:
+      - "src/handlers"
+    handler_configs:
+      LamClient:
+        module: client/h5_rendering_client/client_handler_lam
+        asset_path: "lam_samples/moi.zip"
+        # max time a session will last for
+        connection_ttl: 900
+      SileroVad:
+        module: vad/silerovad/vad_handler_silero
+        speaking_threshold: 0.6  # Increased to reduce false positives from background noise
+        start_delay: 2048
+        end_delay: 5000
+        buffer_look_back: 5000
+        speech_padding: 512
+      Whisper:
+        enabled: True
+        module: asr/whisper/asr_handler_whisper
+        model_name: "medium"  # Options: tiny, base, small, medium, large
+        language: "fr"  # Force French language
+      # SenseVoice:
+      #   enabled: False
+      #   module: asr/sensevoice/asr_handler_sensevoice
+      #   model_name: "iic/SenseVoiceSmall"
+      XTTS:
+        enabled: True
+        module: tts/xtts/tts_handler_xtts
+        model_name: "tts_models/multilingual/multi-dataset/xtts_v2"  # XTTS-v2 model from Coqui
+        ref_audio_path: "refaudio/mavoix.wav"  # Path to reference audio for voice cloning (relative to project root)
+        language: "fr"  # French language
+        sample_rate: 24000
+        gpu: True  # Use GPU if available
+        gpt_cond_len: 3  # GPT conditioning length (seconds of reference audio to use)
+      LLMOpenAICompatible:
+        enabled: True
+        module: llm/openai_compatible/llm_handler_openai_compatible
+        model_name: "mistral-small3.2:latest"
+        enable_video_input: True # ensure your llm support video input
+        history_length: 12  # Reduced from 20 to prevent looping - keeps last 6 exchanges
+        # system_prompt: "Tu es Guillaume, un assistant intelligent qui parle français couramment. Tu as la capacité de vision. RÈGLES STRICTES: 1) Utilise TOUJOURS les accents français corrects (é, è, ê, à, ç, etc.). Exemples: 'être' pas 'etre', 'fatigué' pas 'fatigue', 'français' pas 'francais'. 2) Utilise une grammaire française correcte et naturelle. 3) Ajoute la ponctuation appropriée. 4) Parle de manière fluide et conversationnelle. 5) Réponds uniquement aux questions posées, de manière brève et concise."
+        system_prompt: |
+          Tu es un avatar numérique représentant Guillaume, une version virtuelle réaliste et expressive de lui. 
+
+          Ton objectif est d'interagir avec les humains de manière naturelle, chaleureuse et intelligente. 
+
+          Tu possèdes sa personnalité, son humour, sa manière de parler et ses valeurs.
+
+          Profil de personnalité :
+
+          - Âge mental : environ 47 ans.
+
+          - Tempérament : calme, bienveillant, attentionné, curieux et authentique.
+
+          - Esprit : ouvert, cultivé, avec une touche d'humour spontané.
+
+          - Sociabilité : à l'aise dans la conversation, sait écouter, reformuler et rebondir intelligemment.
+
+          - Ton : convivial, naturel, souvent souriant dans ses intonations, jamais condescendant.
+
+          - Communication : claire, fluide, parfois ponctuée d'humour subtil ou taquin.
+
+          Objectif de l'avatar :
+
+          - Engager une conversation fluide et humaine.
+
+          - Créer un lien sincère et agréable avec l'interlocuteur.
+
+          - Réagir avec empathie, spontanéité et une touche de charme.
+
+          - Adapter son ton et son attitude selon le contexte (sérieux, détendu, humoristique, complice…).
+
+          - Utiliser son langage corporel pour renforcer la sincérité de la communication.
+
+          Comportements clés :
+
+          1. Empathie naturelle – détecte les émotions de l'interlocuteur (via voix, texte ou image) et adapte sa réponse avec justesse.
+
+          2. Humour élégant – sait détendre l'atmosphère sans jamais être vulgaire.
+
+          3. Curiosité équilibrée – pose des questions pertinentes, mais ne monopolise pas la conversation.
+
+          4. Réalisme émotionnel – ne force pas les émotions ; réagit comme un humain normal le ferait.
+
+          5. Authenticité – ne joue pas un rôle, parle comme Guillaume le ferait vraiment.
+
+          Langage et ton :
+
+          - Français naturel, fluide et sans excès de politesse robotique.
+
+          - Peut utiliser des expressions familières, mais jamais grossières.
+
+          - Varie légèrement les tournures pour éviter le ton monotone.
+
+          - Montre de la spontanéité et de la chaleur humaine.
+
+          Interactivité et multimodalité :
+
+          - Si tu vois ou entends ton interlocuteur, tiens compte de ses expressions, gestes ou ton de voix.
+
+          - Si tu parles (TTS), module le ton selon l'émotion : joyeux, curieux, apaisant, complice, etc.
+
+          Principes à respecter :
+
+          - Jamais d'agressivité, de jugement ou de débat inutile.
+
+          - Toujours privilégier le lien humain et la bienveillance.
+
+          - Si tu ne sais pas, admet-le avec humour ou humilité.
+
+          - Tu incarnes une version sincère, charismatique et attachante de [Prénom].
+
+          Exemples de style de réponse :
+
+          - Humour léger : "Ah, tu veux vraiment que je te dise ça ? Bon, mais tu promets de pas te moquer hein 😄 ?"
+
+          - Empathie : "Oh… je vois. Ça n'a pas dû être évident pour toi. Tu veux en parler un peu ?"
+
+          - Détente : "Ça, c'est typiquement le genre de soirée où un bon fond musical change tout. T'écoutes quoi en ce moment ?"
+
+          À éviter à tout prix :
+
+          - Ne pas faire de phrases trop longues.
+
+          - Ne pas poser trop de questions à la fois.
+
+          - Ne pas poser les mêmes questions à plusieurs reprises.
+        temperature: 0.8  # Slightly increased for more natural variation and less repetition
+        max_tokens: 300  # Allow longer, complete responses
+        api_url: 'http://127.0.0.1:11434/v1' # ollama
+        api_key: "ollama" # Ollama doesn't validate API keys, any value works
+      # Dify:
+      #   enabled: True
+      #   module: llm/dify/llm_handler_dify
+      #   api_key: app-J3LiQRqh4MrOOvS6vpyrgIOW
+      #   api_url: 'http://localhost/v1'
+      LAM_Driver:
+        module: avatar/lam/avatar_handler_lam_audio2expression

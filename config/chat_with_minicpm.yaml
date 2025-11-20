@@ -27,13 +27,13 @@ default:
         module: llm/minicpm/llm_handler_minicpm
         model_name: "MiniCPM-o-2_6"
         # model_name: "MiniCPM-o-2_6-int4"
-        voice_prompt: "你是一个AI助手。你能接受视频，音频和文本输入并输出语音和文本。模仿输入音频中的声音特征。"
-        assistant_prompt: "作为助手，你将使用这种声音风格说话。"
-        enable_video_input: True
+        voice_prompt: "You are an AI assistant named Vanessa. You can accept video, audio, and text inputs, and output voice and text. Imitate the voice characteristics in the input audio. Always respond in English."
+        assistant_prompt: "As the assistant named Vanessa, you will speak using this voice style. Always respond in English."
+        enable_video_input: True  # False to prevent automatic video analysis on regular questions
         skip_video_frame: 2
       LiteAvatar:
         module: avatar/liteavatar/avatar_handler_liteavatar
-        avatar_name: 20250408/sample_data
+        avatar_name: 20250408/P1hcT8b49FkdSjjNT_fJ4N5g
         fps: 25
         debug: false
         enable_fast_mode: false
