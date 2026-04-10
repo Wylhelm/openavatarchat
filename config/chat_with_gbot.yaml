@@ -1,0 +1,48 @@
+default:
+  logger:
+    log_level: "INFO"
+  service:
+    host: "0.0.0.0"
+    port: 8282
+    cert_file: "ssl_certs/localhost.crt"
+    cert_key: "ssl_certs/localhost.key"
+  chat_engine:
+    model_root: "models"
+    concurrent_limit: 5
+    handler_search_path:
+      - "src/handlers"
+    handler_configs:
+      LamClient:
+        module: client/h5_rendering_client/client_handler_lam
+        asset_path: "lam_samples/inessas2.zip"
+        # max time a session will last for
+        connection_ttl: 900
+      SileroVad:
+        module: vad/silerovad/vad_handler_silero
+        speaking_threshold: 0.6  # Increased to reduce false positives from background noise
+        start_delay: 2048
+        end_delay: 5000
+        buffer_look_back: 5000
+        speech_padding: 512
+      WhisperLocal:
+        enabled: True
+        module: asr/whisper_local/asr_handler_whisper_local
+        api_url: "http://10.0.0.175:9400"
+        language: "fr"
+      CoquiLocal:
+        enabled: True
+        module: tts/coqui_local/tts_handler_coqui_local
+        api_url: "http://10.0.0.175:8200"
+        voice: "Chandra MacFarland"
+        language: "fr"
+      LLMOpenAICompatible:
+        enabled: True
+        module: llm/openai_compatible/llm_handler_openai_compatible
+        model_name: "gbot"
+        history_length: 12
+        # G-Bot system prompt is managed by the bridge
+        system_prompt: ""
+        api_url: "http://10.0.0.253:9000/v1"
+        api_key: "${AVATAR_BRIDGE_API_KEY}"
+      LAM_Driver:
+        module: avatar/lam/avatar_handler_lam_audio2expression
