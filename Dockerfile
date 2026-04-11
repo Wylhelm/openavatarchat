@@ -31,14 +31,6 @@ RUN pip install uv && \
     uv venv --python 3.11.11 && \
     uv sync --no-install-workspace
 
-# Force-install matching torch/torchvision/torchaudio versions to avoid symbol mismatch
-# CRITICAL: +cu128 suffix required — without it pip resolves incompatible latest versions
-RUN .venv/bin/pip install --force-reinstall \
-    'torch==2.8.0+cu128' \
-    'torchvision==0.23.0+cu128' \
-    'torchaudio==2.8.0+cu128' \
-    --index-url https://download.pytorch.org/whl/cu128
-
 ADD ./src $WORK_DIR/src
 
 # Copy script files (must be copied before installing config dependencies)
@@ -67,6 +59,15 @@ RUN dos2unix $WORK_DIR/scripts/post_config_install.sh && \
 
 ADD ./resource $WORK_DIR/resource
 ADD ./.env* $WORK_DIR/
+
+# CRITICAL: force-install torch+cu128 LAST — after all uv/install.py steps
+# uv sync + install.py reinstall incompatible torchaudio 2.11.0 by default
+# +cu128 suffix is mandatory — without it pip resolves wrong versions
+RUN .venv/bin/pip install --force-reinstall \
+    'torch==2.8.0+cu128' \
+    'torchvision==0.23.0+cu128' \
+    'torchaudio==2.8.0+cu128' \
+    --index-url https://download.pytorch.org/whl/cu128
 
 WORKDIR $WORK_DIR
 ENTRYPOINT [".venv/bin/python", "src/demo.py"]
