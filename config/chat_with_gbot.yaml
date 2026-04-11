@@ -7,14 +7,15 @@ default:
     # SSL disabled — use nginx reverse proxy with real cert for HTTPS
     # cert_file: "ssl_certs/localhost.crt"
     # cert_key: "ssl_certs/localhost.key"
-    rtc_config:
+
+  chat_engine:
+    model_root: "models"
+    concurrent_limit: 5
+    turn_config:
       turn_provider: "stun_server"
       stun_urls:
         - "stun:stun.l.google.com:19302"
         - "stun:stun1.l.google.com:19302"
-  chat_engine:
-    model_root: "models"
-    concurrent_limit: 5
     handler_search_path:
       - "src/handlers"
     handler_configs:
