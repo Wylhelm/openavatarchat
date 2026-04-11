@@ -98,9 +98,9 @@ class HandlerLLM(HandlerBase, ABC):
         context.enable_video_input = handler_config.enable_video_input
         context.history = ChatHistory(history_length=handler_config.history_length)
         context.client = OpenAI(
-            # 若没有配置环境变量，请用百炼API Key将下行替换为：api_key="sk-xxx",
             api_key=context.api_key,
             base_url=context.api_url,
+            timeout=120.0,
         )
         return context
     
