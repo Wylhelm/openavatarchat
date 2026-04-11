@@ -7,6 +7,11 @@ default:
     # SSL disabled — use nginx reverse proxy with real cert for HTTPS
     # cert_file: "ssl_certs/localhost.crt"
     # cert_key: "ssl_certs/localhost.key"
+    rtc_config:
+      turn_provider: "stun_server"
+      stun_urls:
+        - "stun:stun.l.google.com:19302"
+        - "stun:stun1.l.google.com:19302"
   chat_engine:
     model_root: "models"
     concurrent_limit: 5
@@ -18,10 +23,6 @@ default:
         asset_path: "lam_samples/inessas2.zip"
         # max time a session will last for
         connection_ttl: 900
-        turn_config:
-          urls:
-            - "stun:stun.l.google.com:19302"
-            - "stun:stun1.l.google.com:19302"
       SileroVad:
         module: vad/silerovad/vad_handler_silero
         speaking_threshold: 0.6  # Increased to reduce false positives from background noise
