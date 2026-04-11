@@ -131,7 +131,7 @@ async def chat_completions(request: Request, api_key: str = Depends(verify_api_k
             [
                 "openclaw",
                 "agent",
-                "--session-id", OPENCLAW_SESSION_ID,
+                "--to", OPENCLAW_SESSION_ID,
                 "--message", last_user_message,
                 "--json",
             ],

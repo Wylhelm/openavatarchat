@@ -1,0 +1,33 @@
+services:
+  open-avatar-chat:
+    image: open-avatar-chat:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        CONFIG_FILE: config/chat_with_gbot.yaml
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - AVATAR_BRIDGE_API_KEY=${AVATAR_BRIDGE_API_KEY}
+    ports:
+      - "8282:8282"
+    volumes:
+      - ./build:/root/open-avatar-chat/build
+      - ./models:/root/open-avatar-chat/models
+      - ./model_zoo:/root/open-avatar-chat/model_zoo
+      - ./lam_samples:/root/open-avatar-chat/lam_samples
+      - ./refaudio:/root/open-avatar-chat/refaudio
+      - ./resource:/root/open-avatar-chat/resource
+      - ./ssl_certs:/root/open-avatar-chat/ssl_certs
+      - ./config:/root/open-avatar-chat/config
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    command: ["--config", "config/chat_with_gbot.yaml"]

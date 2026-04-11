@@ -32,8 +32,11 @@ RUN pip install uv && \
     uv sync --no-install-workspace
 
 # Force-install matching torch/torchvision/torchaudio versions to avoid symbol mismatch
+# CRITICAL: +cu128 suffix required — without it pip resolves incompatible latest versions
 RUN .venv/bin/pip install --force-reinstall \
-    torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 \
+    'torch==2.8.0+cu128' \
+    'torchvision==0.23.0+cu128' \
+    'torchaudio==2.8.0+cu128' \
     --index-url https://download.pytorch.org/whl/cu128
 
 ADD ./src $WORK_DIR/src
@@ -66,4 +69,4 @@ ADD ./resource $WORK_DIR/resource
 ADD ./.env* $WORK_DIR/
 
 WORKDIR $WORK_DIR
-ENTRYPOINT ["uv", "run", "src/demo.py"]
+ENTRYPOINT [".venv/bin/python", "src/demo.py"]
