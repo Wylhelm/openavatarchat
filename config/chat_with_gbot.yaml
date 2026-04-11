@@ -18,6 +18,10 @@ default:
         asset_path: "lam_samples/inessas2.zip"
         # max time a session will last for
         connection_ttl: 900
+        turn_config:
+          urls:
+            - "stun:stun.l.google.com:19302"
+            - "stun:stun1.l.google.com:19302"
       SileroVad:
         module: vad/silerovad/vad_handler_silero
         speaking_threshold: 0.6  # Increased to reduce false positives from background noise
