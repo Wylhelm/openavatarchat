@@ -89,7 +89,8 @@ COPY ./src/handlers/avatar/lam/pyproject.toml $WORK_DIR/src/handlers/avatar/lam/
 COPY ./src/handlers/vad/silerovad/pyproject.toml $WORK_DIR/src/handlers/vad/silerovad/pyproject.toml
 COPY ./src/handlers/tts/bailian_tts/pyproject.toml $WORK_DIR/src/handlers/tts/bailian_tts/pyproject.toml
 COPY ./src/handlers/asr/sensevoice/pyproject.toml $WORK_DIR/src/handlers/asr/sensevoice/pyproject.toml
-COPY ./src/handlers/avatar/musetalk/pyproject.toml $WORK_DIR/src/handlers/avatar/musetalk/pyproject.toml
+# musetalk excluded — not used in chat_with_gbot.yaml (uses LAM instead); avoids mmcv==2.2.0 build conflict
+# COPY ./src/handlers/avatar/musetalk/pyproject.toml $WORK_DIR/src/handlers/avatar/musetalk/pyproject.toml
 # Copy third_party directory
 COPY ./src/third_party $WORK_DIR/src/third_party
 
@@ -100,7 +101,7 @@ RUN pip install --no-cache-dir uv && \
 # Activate virtual environment and install dependencies
 # Note: cosyvoice excluded from workspace (uses whisper_local handler instead)
 RUN uv pip install setuptools pip wheel && \
-    uv sync --all-packages --no-build-isolation && \
+    uv sync --all-packages && \
     uv pip uninstall mmcv && \
     uv run mim install mmcv==2.2.0 --force && \
     # Fix mmdet version compatibility
