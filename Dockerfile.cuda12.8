@@ -100,7 +100,7 @@ RUN pip install --no-cache-dir uv && \
 # Activate virtual environment and install dependencies
 # Note: cosyvoice excluded from workspace (uses whisper_local handler instead)
 RUN uv pip install setuptools pip wheel && \
-    uv sync --all-packages && \
+    uv sync --all-packages --no-build-isolation && \
     uv pip uninstall mmcv && \
     uv run mim install mmcv==2.2.0 --force && \
     # Fix mmdet version compatibility
