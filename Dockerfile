@@ -39,7 +39,10 @@ ADD ./scripts $WORK_DIR/scripts
 # Execute pre-config installation script
 RUN echo "Using config file: ${CONFIG_FILE}"
 COPY $CONFIG_FILE /tmp/build_config.yaml
-RUN chmod +x $WORK_DIR/scripts/pre_config_install.sh && \
+# Fix Windows CRLF line endings in shell scripts
+RUN apt-get install -y dos2unix && \
+    find $WORK_DIR/scripts -name "*.sh" -exec dos2unix {} \; && \
+    chmod +x $WORK_DIR/scripts/pre_config_install.sh && \
     $WORK_DIR/scripts/pre_config_install.sh --config /tmp/build_config.yaml
 
 # Install config dependencies
@@ -49,7 +52,8 @@ RUN uv run install.py \
     --skip-core
 
 # Execute post-config installation script
-RUN chmod +x $WORK_DIR/scripts/post_config_install.sh && \
+RUN dos2unix $WORK_DIR/scripts/post_config_install.sh && \
+    chmod +x $WORK_DIR/scripts/post_config_install.sh && \
     $WORK_DIR/scripts/post_config_install.sh --config /tmp/build_config.yaml && \
     rm /tmp/build_config.yaml
 
