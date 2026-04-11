@@ -29,6 +29,14 @@ def load_configs(in_args):
 
     out_logger_config = LoggerConfigData.model_validate(config.get("logger", {}))
     out_service_config = ServiceConfigData.model_validate(config.get("service", {}))
-    out_engine_config = ChatEngineConfigModel.model_validate(config.get("chat_engine", {}))
+    # Dynaconf uppercases all keys - normalize to lowercase for pydantic model_validate
+    raw_engine = config.get("chat_engine", {})
+    if hasattr(raw_engine, 'to_dict'):
+        raw_engine = raw_engine.to_dict()
+    elif hasattr(raw_engine, 'as_dict'):
+        raw_engine = raw_engine.as_dict()
+    if isinstance(raw_engine, dict):
+        raw_engine = {k.lower(): v for k, v in raw_engine.items()}
+    out_engine_config = ChatEngineConfigModel.model_validate(raw_engine)
     return out_logger_config, out_service_config, out_engine_config
 
