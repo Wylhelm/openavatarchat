@@ -324,10 +324,17 @@ export const useVideoChatStore = defineStore('videoChatStore', {
             this.chatDataChannel = dataChannel as any
 
             if (this.avatarType && this.avatarWSRoute) {
-              const ws = this.initWebsocket(this.avatarWSRoute, this.webRTCId)
-              if (this.avatarType === 'lam') {
-                this.localAvatarRenderer = this.doGaussianRender(ws)
-              }
+              // Delay WS motion connection to allow server to register session delegate
+              // after WebRTC SDP negotiation (race condition fix)
+              const wsRoute = this.avatarWSRoute
+              const webRTCId = this.webRTCId
+              const avatarType = this.avatarType
+              setTimeout(() => {
+                const ws = this.initWebsocket(wsRoute, webRTCId)
+                if (avatarType === 'lam') {
+                  this.localAvatarRenderer = this.doGaussianRender(ws)
+                }
+              }, 2000)
             }
           })
           .catch((e) => {
