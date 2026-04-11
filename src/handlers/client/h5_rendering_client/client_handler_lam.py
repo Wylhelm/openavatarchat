@@ -73,6 +73,12 @@ class LamClientSessionDelegate(RtcClientSessionDelegate):
                         type=ChatSignalType.END,
                     )
                     self.emit_signal(signal)
+                elif msg_type == "StartSpeech":
+                    signal = ChatSignal(
+                        source_type=ChatSignalSourceType.CLIENT,
+                        type=ChatSignalType.BEGIN,
+                    )
+                    self.emit_signal(signal)
             except Exception as e:
                 logger.error(f"Error occurs while processing client message: {e}")
                 continue
@@ -81,8 +87,17 @@ class LamClientSessionDelegate(RtcClientSessionDelegate):
         # TODO: this is temp implementation a full signal infrastructure is needed.
         super().emit_signal(signal)
         logger.info(signal)
-        if signal.source_type == ChatSignalSourceType.CLIENT and signal.type == ChatSignalType.END:
-            self.shared_states.enable_vad = True
+        if signal.source_type == ChatSignalSourceType.CLIENT:
+            if signal.type == ChatSignalType.END:
+                self.shared_states.enable_vad = True
+            elif signal.type == ChatSignalType.BEGIN:
+                # User started speaking - interrupt current avatar speech
+                logger.info("User started speaking - sending interrupt signal")
+                interrupt_signal = ChatSignal(
+                    source_type=ChatSignalSourceType.CLIENT,
+                    type=ChatSignalType.INTERRUPT,
+                )
+                super().emit_signal(interrupt_signal)
 
     async def serve_websocket(self, websocket: WebSocket):
         logger.warning(f"Ready to serve websocket {websocket}")

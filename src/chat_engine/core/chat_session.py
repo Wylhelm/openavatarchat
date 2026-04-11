@@ -390,5 +390,16 @@ class ChatSession:
 
     def emit_signal(self, signal: ChatSignal):
         # TODO this is temp implementation a full signal infrastructure is needed.
-        if signal.source_type == ChatSignalSourceType.CLIENT and signal.type == ChatSignalType.END:
-            self.session_context.shared_states.enable_vad = True
+        if signal.source_type == ChatSignalSourceType.CLIENT:
+            if signal.type == ChatSignalType.END:
+                self.session_context.shared_states.enable_vad = True
+            elif signal.type == ChatSignalType.INTERRUPT:
+                logger.warning("Barge-in: Interrupting avatar output queues!")
+                # Flush the output queues so the avatar stops talking
+                for queue in self.session_context.output_queues.values():
+                    while not queue.empty():
+                        try:
+                            queue.get_nowait()
+                        except:
+                            pass
+                self.session_context.shared_states.enable_vad = True
