@@ -162,11 +162,20 @@ class ClientHandlerLam(ClientHandlerRtc):
         async def motion_data_stream(websocket: WebSocket, rtc_id: str):
             await websocket.accept()
             logger.info(f"Got websocket connection {websocket} for rtc_id {rtc_id}.")
-            session_delegate = self.handler_delegate.find_session_delegate(rtc_id)
+            # Retry up to 10 times with 500ms delay to handle race condition
+            # where frontend connects before WebRTC session is fully registered
+            session_delegate = None
+            for attempt in range(10):
+                session_delegate = self.handler_delegate.find_session_delegate(rtc_id)
+                if session_delegate is not None:
+                    break
+                logger.warning(f"RTC stream {rtc_id} not ready, retrying ({attempt+1}/10)...")
+                await asyncio.sleep(0.5)
             if session_delegate is None:
-                msg = f"RTC stream {rtc_id} not found."
+                msg = f"RTC stream {rtc_id} not found after retries."
                 logger.error(msg)
                 await websocket.close(4503, msg)
+                return
             await session_delegate.serve_websocket(websocket)
 
         @app.get(asset_route + "/{file_name}")
