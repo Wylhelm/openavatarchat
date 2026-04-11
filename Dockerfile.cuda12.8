@@ -97,10 +97,10 @@ RUN pip install --no-cache-dir uv && \
     uv venv --python /usr/bin/python3.11 --seed
 
 # Activate virtual environment and install dependencies
+# Install setuptools first so pkg_resources is available for openai-whisper build
 RUN uv pip install setuptools pip wheel && \
-    uv pip install --no-build-isolation setuptools pkg_resources && \
     uv pip install --no-build-isolation openai-whisper==20240930 && \
-    uv sync --all-packages --no-build-isolation && \
+    uv sync --all-packages && \
     uv pip uninstall mmcv && \
     uv run mim install mmcv==2.2.0 --force && \
     # Fix mmdet version compatibility
