@@ -6,7 +6,8 @@ readme = "README.md"
 requires-python = ">=3.11.7, <3.12"
 dependencies = [
     "aiohttp~=3.11.12",
-    "aiortc~=1.12.0",
+    # aiortc excluded — requires ffmpeg 7 + pkg-config; not needed with whisper_local/coqui_local handlers
+    # "aiortc~=1.12.0",
     "dynaconf~=3.2.7",
     "fastapi[standard]~=0.115.12",
     "fastrtc",
@@ -35,17 +36,13 @@ dependencies = [
 ]
 
 [tool.uv.workspace]
+# Only include handlers used in chat_with_gbot.yaml
+# Excluded: cosyvoice (whisper_local used), xtts (coqui_local used), musetalk (LAM used)
+# Excluded: minicpm, liteavatar, bailian_tts, sensevoice (not in gbot config)
 members = [
     "src/handlers/tts/edgetts",
-    "src/handlers/tts/cosyvoice",
-    "src/handlers/tts/xtts",
-    "src/handlers/llm/minicpm",
-    "src/handlers/avatar/liteavatar",
     "src/handlers/avatar/lam",
     "src/handlers/vad/silerovad",
-    "src/handlers/tts/bailian_tts",
-    "src/handlers/asr/sensevoice",
-    "src/handlers/avatar/musetalk",
 ]
 
 [tool.uv.sources]
