@@ -16,8 +16,13 @@ if not AVATAR_BRIDGE_API_KEY:
     sys.exit(1)
 
 AVATAR_SAFE_MODE = os.environ.get("AVATAR_SAFE_MODE", "true").lower() in ("true", "1", "yes")
-OPENCLAW_SESSION_ID = os.environ.get("OPENCLAW_SESSION_ID", "main")
+OPENCLAW_SESSION_ID = os.environ.get("OPENCLAW_TELEGRAM_ID") or os.environ.get("OPENCLAW_SESSION_ID", "main")
 PORT = int(os.environ.get("PORT", "9000"))
+
+# SSH mode: run openclaw on remote VM via SSH instead of locally
+SSH_HOST = os.environ.get("OPENCLAW_SSH_HOST", "")
+SSH_USER = os.environ.get("OPENCLAW_SSH_USER", "guillaume")
+SSH_KEY = os.environ.get("OPENCLAW_SSH_KEY", "")
 
 BLOCKED_PATTERNS = [
     "rm ",
@@ -125,24 +130,35 @@ async def chat_completions(request: Request, api_key: str = Depends(verify_api_k
     if AVATAR_SAFE_MODE and is_message_blocked(last_user_message):
         return JSONResponse(content=make_openai_response(SAFE_MODE_BLOCKED_RESPONSE))
 
-    # Forward to OpenClaw
+    # Forward to OpenClaw (local or via SSH)
     try:
-        result = subprocess.run(
-            [
-                "openclaw",
-                "agent",
-                "--to", OPENCLAW_SESSION_ID,
-                "--message", last_user_message,
-                "--json",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
+        if SSH_HOST:
+            # Run openclaw on remote VM via SSH
+            ssh_cmd = ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes"]
+            if SSH_KEY:
+                ssh_cmd += ["-i", SSH_KEY]
+            ssh_cmd += [
+                f"{SSH_USER}@{SSH_HOST}",
+                f"openclaw agent --to {OPENCLAW_SESSION_ID} --message {json.dumps(last_user_message)} --json"
+            ]
+            result = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=120)
+        else:
+            result = subprocess.run(
+                [
+                    "openclaw",
+                    "agent",
+                    "--to", OPENCLAW_SESSION_ID,
+                    "--message", last_user_message,
+                    "--json",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
     except subprocess.TimeoutExpired:
         raise HTTPException(status_code=500, detail="OpenClaw subprocess timed out")
     except FileNotFoundError:
-        raise HTTPException(status_code=500, detail="openclaw command not found")
+        raise HTTPException(status_code=500, detail="openclaw/ssh command not found")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Subprocess error: {str(e)}")
 
