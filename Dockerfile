@@ -31,6 +31,11 @@ RUN pip install uv && \
     uv venv --python 3.11.11 && \
     uv sync --no-install-workspace
 
+# Force-install matching torch/torchvision/torchaudio versions to avoid symbol mismatch
+RUN .venv/bin/pip install --force-reinstall \
+    torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 \
+    --index-url https://download.pytorch.org/whl/cu128
+
 ADD ./src $WORK_DIR/src
 
 # Copy script files (must be copied before installing config dependencies)
