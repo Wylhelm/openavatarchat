@@ -26,11 +26,11 @@ default:
         connection_ttl: 900
       SileroVad:
         module: vad/silerovad/vad_handler_silero
-        speaking_threshold: 0.6  # Increased to reduce false positives from background noise
+        speaking_threshold: 0.3
         start_delay: 2048
-        end_delay: 5000
+        end_delay: 8000
         buffer_look_back: 5000
-        speech_padding: 512
+        speech_padding: 1024
       WhisperLocal:
         enabled: True
         module: asr/whisper_local/asr_handler_whisper_local
