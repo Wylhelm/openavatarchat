@@ -166,13 +166,13 @@ def fetch_live_context(query: str) -> str:
     context_parts = []
     try:
         # Bridge runs on the VM — call tools locally, no SSH needed
-        if any(kw in query for kw in ["email", "courriel", "message", "inbox", "mail"]):
+        if any(kw in query for kw in ["email", "courriel", "message", "inbox", "mail", "courrier"]):
             result = subprocess.run(
-                ["gog", "gmail", "list", "--max", "5"],
-                capture_output=True, text=True, timeout=10
+                ["gog", "gmail", "search", "newer_than:2d", "--max", "5", "--plain"],
+                capture_output=True, text=True, timeout=15
             )
             if result.returncode == 0 and result.stdout.strip():
-                context_parts.append(f"Emails r\u00e9cents:\n{result.stdout.strip()[:500]}")
+                context_parts.append(f"Emails r\u00e9cents:\n{result.stdout.strip()[:800]}")
 
         if any(kw in query for kw in ["m\u00e9t\u00e9o", "weather", "temps", "dehors"]):
             result = subprocess.run(
@@ -182,10 +182,10 @@ def fetch_live_context(query: str) -> str:
             if result.returncode == 0 and result.stdout.strip():
                 context_parts.append(f"M\u00e9t\u00e9o: {result.stdout.strip()}")
 
-        if any(kw in query for kw in ["agenda", "calendrier", "calendar", "rendez-vous", "meeting"]):
+        if any(kw in query for kw in ["agenda", "calendrier", "calendar", "rendez-vous", "meeting", "event", "semaine"]):
             result = subprocess.run(
-                ["gog", "calendar", "list", "--max", "5"],
-                capture_output=True, text=True, timeout=10
+                ["gog", "calendar", "events", "--max", "5", "--plain"],
+                capture_output=True, text=True, timeout=15
             )
             if result.returncode == 0 and result.stdout.strip():
                 context_parts.append(f"Agenda:\n{result.stdout.strip()[:500]}")
