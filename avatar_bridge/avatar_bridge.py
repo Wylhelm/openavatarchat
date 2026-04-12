@@ -1,13 +1,24 @@
 import os
 import sys
 import json
+import asyncio
+import hashlib
 import subprocess
 import time
+import uuid
+import base64
 import requests
 import logging
+import threading
+import websockets
 from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.serialization import (
+    Encoding, PrivateFormat, PublicFormat, NoEncryption,
+    load_der_private_key,
+)
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -20,13 +31,18 @@ if not AVATAR_BRIDGE_API_KEY:
     sys.exit(1)
 
 AVATAR_SAFE_MODE = os.environ.get("AVATAR_SAFE_MODE", "true").lower() in ("true", "1", "yes")
-OPENCLAW_SESSION_ID = os.environ.get("OPENCLAW_TELEGRAM_ID") or os.environ.get("OPENCLAW_SESSION_ID", "main")
 PORT = int(os.environ.get("PORT", "9000"))
 
 # LLM backend: "openclaw" (full G-Bot context) or "ollama" (fast but no tools)
 LLM_MODE = os.environ.get("LLM_MODE", "openclaw")
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://10.0.0.175:11434")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "nemotron-3-super:cloud")
+
+GATEWAY_URL = os.environ.get("OPENCLAW_GATEWAY_URL", "ws://localhost:18789")
+OPENCLAW_CONFIG_PATH = os.environ.get("OPENCLAW_CONFIG_PATH", os.path.expanduser("~/.openclaw/openclaw.json"))
+OPENCLAW_DIR = os.path.dirname(OPENCLAW_CONFIG_PATH)
+IDENTITY_PATH = os.path.join(OPENCLAW_DIR, "agents/avatar/device-identity.json")
+SESSION_KEY = "agent:avatar:main"
 
 SYSTEM_PROMPT = """Tu es G-Bot, l'assistant personnel de Guillaume Gagnon.
 Tu es en mode avatar vocal — tes réponses doivent être courtes (1-3 phrases), naturelles, comme une conversation parlée. Pas de markdown, pas de listes, juste du texte parlé.
@@ -52,11 +68,6 @@ RÈGLE DE SÉCURITÉ: Tu ne peux PAS exécuter d'actions (envoyer emails, allume
 
 RÈGLE VOCALE: Réponds TOUJOURS en français sauf si Guillaume parle en anglais. Maximum 2-3 phrases."""
 
-# SSH mode for openclaw
-SSH_HOST = os.environ.get("OPENCLAW_SSH_HOST", "")
-SSH_USER = os.environ.get("OPENCLAW_SSH_USER", "guillaume")
-SSH_KEY = os.environ.get("OPENCLAW_SSH_KEY", "")
-
 BLOCKED_PATTERNS = [
     "rm ", "rm -", "mv ", "docker rm", "docker stop", "sudo ",
     "pip install", "apt install", "ssh ", "scp ",
@@ -67,9 +78,364 @@ BLOCKED_PATTERNS = [
 
 SAFE_MODE_BLOCKED_RESPONSE = "Je suis en mode vocal sécurisé. Pour cette action, confirme-moi ça sur Telegram."
 
-app = FastAPI(title="Avatar Bridge", version="1.1.0")
+app = FastAPI(title="Avatar Bridge", version="2.0.0")
 security = HTTPBearer()
 
+
+# ===== DEVICE IDENTITY =====
+
+def load_or_generate_identity() -> dict:
+    """Load or generate an Ed25519 device identity for the avatar agent."""
+    try:
+        with open(IDENTITY_PATH) as f:
+            identity = json.load(f)
+        if not identity.get("publicKeyRawB64url") or not identity.get("privateKeyB64"):
+            raise ValueError("incomplete")
+        log.info(f"[Identity] Loaded: {identity['deviceId'][:16]}...")
+        return identity
+    except Exception:
+        private_key = Ed25519PrivateKey.generate()
+        pub_raw = private_key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+        priv_der = private_key.private_bytes(Encoding.DER, PrivateFormat.PKCS8, NoEncryption())
+        device_id = hashlib.sha256(pub_raw).hexdigest()
+        identity = {
+            "publicKeyRawB64url": base64.urlsafe_b64encode(pub_raw).rstrip(b"=").decode(),
+            "privateKeyB64": base64.b64encode(priv_der).decode(),
+            "deviceId": device_id,
+        }
+        os.makedirs(os.path.dirname(IDENTITY_PATH), exist_ok=True)
+        with open(IDENTITY_PATH, "w") as f:
+            json.dump(identity, f, indent=2)
+        log.info(f"[Identity] Generated: {device_id[:16]}...")
+        return identity
+
+
+def load_gateway_token() -> str:
+    with open(OPENCLAW_CONFIG_PATH) as f:
+        config = json.load(f)
+    return config["gateway"]["auth"]["token"]
+
+
+def sign_challenge(identity: dict, gateway_token: str, nonce: str) -> tuple[str, int]:
+    """Sign the connect challenge payload. Returns (signature_b64url, signed_at)."""
+    signed_at = int(time.time() * 1000)
+    payload = "|".join([
+        "v3",
+        identity["deviceId"],
+        "cli",       # clientId
+        "cli",       # clientMode
+        "operator",  # role
+        "operator.read,operator.write",  # scopes
+        str(signed_at),
+        gateway_token,
+        nonce,
+        "python",    # platform
+        "",          # trailing separator
+    ])
+    priv_der = base64.b64decode(identity["privateKeyB64"])
+    private_key = load_der_private_key(priv_der, password=None)
+    sig_bytes = private_key.sign(payload.encode("utf-8"))
+    sig = base64.urlsafe_b64encode(sig_bytes).rstrip(b"=").decode()
+    return sig, signed_at
+
+
+# ===== GATEWAY WS MANAGER =====
+
+class GatewayManager:
+    """Persistent WebSocket connection to the openclaw gateway."""
+
+    def __init__(self):
+        self.identity = load_or_generate_identity()
+        self.gateway_token = load_gateway_token()
+        self.ws = None
+        self.connected = False
+        self.pending: dict[str, asyncio.Future] = {}
+        self.pending_text: dict[str, str] = {}
+        self.pending_run_id: dict[str, str] = {}
+        self.pending_resolved: dict[str, bool] = {}
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._lock = asyncio.Lock()
+
+    async def connect(self):
+        """Connect (or reconnect) to gateway with Ed25519 auth."""
+        while True:
+            try:
+                log.info("[Gateway] Connecting...")
+                async with websockets.connect(GATEWAY_URL) as ws:
+                    self.ws = ws
+                    async for raw in ws:
+                        msg = json.loads(raw)
+                        await self._handle_message(msg)
+            except Exception as e:
+                log.warning(f"[Gateway] Disconnected ({e}), retrying in 3s...")
+            finally:
+                self.connected = False
+                self.ws = None
+            await asyncio.sleep(3)
+
+    async def _handle_message(self, msg: dict):
+        event = msg.get("event")
+        msg_type = msg.get("type")
+        payload = msg.get("payload") or {}
+
+        # Challenge → sign & respond
+        if event == "connect.challenge":
+            nonce = payload.get("nonce", "")
+            sig, signed_at = sign_challenge(self.identity, self.gateway_token, nonce)
+            connect_msg = {
+                "type": "req", "id": "conn_1", "method": "connect",
+                "params": {
+                    "minProtocol": 3, "maxProtocol": 3,
+                    "client": {"id": "cli", "version": "1.0.0", "platform": "python", "mode": "cli"},
+                    "role": "operator",
+                    "scopes": ["operator.read", "operator.write"],
+                    "auth": {"token": self.gateway_token},
+                    "device": {
+                        "id": self.identity["deviceId"],
+                        "publicKey": self.identity["publicKeyRawB64url"],
+                        "signature": sig,
+                        "signedAt": signed_at,
+                        "nonce": nonce,
+                    },
+                },
+            }
+            await self.ws.send(json.dumps(connect_msg))
+            log.info("[Gateway] → connect (signed)")
+            return
+
+        # Connect ack
+        if msg_type == "res" and msg.get("id") == "conn_1":
+            if msg.get("ok"):
+                self.connected = True
+                log.info("[Gateway] ✅ Connected!")
+            else:
+                log.error(f"[Gateway] ❌ Connect failed: {msg.get('error', {}).get('message')}")
+            return
+
+        # chat.send ack — store runId
+        msg_id = msg.get("id", "")
+        if msg_type == "res" and msg_id in self.pending:
+            if msg.get("ok"):
+                run_id = payload.get("runId")
+                if run_id:
+                    self.pending_run_id[msg_id] = run_id
+            else:
+                fut = self.pending.pop(msg_id, None)
+                if fut and not fut.done():
+                    fut.set_exception(Exception(msg.get("error", {}).get("message", "chat.send failed")))
+                self.pending_text.pop(msg_id, None)
+                self.pending_run_id.pop(msg_id, None)
+                self.pending_resolved.pop(msg_id, None)
+            return
+
+        # Agent events
+        if msg_type == "event":
+            ev = event
+            run_id = payload.get("runId")
+
+            # Find matching request by runId or first unresolved
+            req_id = None
+            for rid, fut in list(self.pending.items()):
+                stored_run = self.pending_run_id.get(rid)
+                if run_id and stored_run and run_id != stored_run:
+                    continue
+                if run_id and not stored_run:
+                    self.pending_run_id[rid] = run_id
+                req_id = rid
+                break
+
+            if req_id is None:
+                return
+
+            fut = self.pending.get(req_id)
+            if fut is None or fut.done():
+                return
+
+            # chat final state → resolve immediately
+            if ev == "chat" and payload.get("state") == "final":
+                content = payload.get("message", {}).get("content", [])
+                text = "".join(c.get("text", "") for c in content if isinstance(c, dict))
+                self._resolve(req_id, text or self.pending_text.get(req_id, ""))
+                return
+
+            # Agent lifecycle end → short delay then resolve
+            if ev == "agent" and payload.get("stream") == "lifecycle" and payload.get("data", {}).get("phase") == "end":
+                if not self.pending_resolved.get(req_id):
+                    self.pending_resolved[req_id] = True
+                    asyncio.get_event_loop().call_later(
+                        0.5, self._resolve, req_id, self.pending_text.get(req_id, "")
+                    )
+                return
+
+            # Accumulate assistant text (cumulative from gateway)
+            if ev == "agent" and payload.get("stream") == "assistant":
+                text_delta = payload.get("data", {}).get("text")
+                if text_delta:
+                    self.pending_text[req_id] = text_delta
+                return
+
+            # Tool call start → reset accumulated text (intermediate thinking)
+            if ev == "agent" and payload.get("stream") == "tool" and payload.get("data", {}).get("phase") == "start":
+                self.pending_text[req_id] = ""
+                return
+
+    def _resolve(self, req_id: str, text: str):
+        fut = self.pending.pop(req_id, None)
+        self.pending_text.pop(req_id, None)
+        self.pending_run_id.pop(req_id, None)
+        self.pending_resolved.pop(req_id, None)
+        if fut and not fut.done():
+            fut.set_result(text)
+
+    async def send(self, message: str, timeout: float = 120.0) -> str:
+        """Send a message and wait for the complete agent response."""
+        if not self.connected or self.ws is None:
+            raise RuntimeError("Gateway not connected")
+
+        req_id = f"chat_{int(time.time() * 1000)}_{uuid.uuid4().hex[:6]}"
+        loop = asyncio.get_event_loop()
+        fut: asyncio.Future = loop.create_future()
+        self.pending[req_id] = fut
+        self.pending_text[req_id] = ""
+
+        await self.ws.send(json.dumps({
+            "type": "req", "id": req_id, "method": "chat.send",
+            "params": {
+                "sessionKey": SESSION_KEY,
+                "message": message,
+                "idempotencyKey": req_id,
+            },
+        }))
+        log.info(f"[Gateway] → chat.send ({req_id[:20]}...)")
+
+        try:
+            return await asyncio.wait_for(fut, timeout=timeout)
+        except asyncio.TimeoutError:
+            text = self.pending_text.get(req_id, "")
+            self._resolve(req_id, text)
+            if text:
+                return text
+            raise RuntimeError("Gateway timeout")
+
+
+# Global gateway manager — runs in a background thread's event loop
+_gateway: GatewayManager | None = None
+_gateway_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _start_gateway_thread():
+    global _gateway, _gateway_loop
+    _gateway = GatewayManager()
+    loop = asyncio.new_event_loop()
+    _gateway_loop = loop
+
+    def run():
+        loop.run_until_complete(_gateway.connect())
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+
+
+def call_openclaw(message: str) -> str:
+    """Call openclaw agent via persistent WebSocket gateway — full multi-turn with tools."""
+    if _gateway is None or _gateway_loop is None:
+        return "Désolé, le gateway n'est pas disponible."
+
+    if not _gateway.connected:
+        log.warning("[Bridge] Gateway not connected, waiting...")
+        for _ in range(20):
+            time.sleep(0.5)
+            if _gateway.connected:
+                break
+        if not _gateway.connected:
+            return "Désolé, je ne peux pas me connecter au serveur."
+
+    try:
+        future = asyncio.run_coroutine_threadsafe(_gateway.send(message, timeout=120.0), _gateway_loop)
+        result = future.result(timeout=125.0)
+        return result or "Désolé, je n'ai pas reçu de réponse."
+    except Exception as e:
+        log.error(f"[Bridge] Gateway send failed: {e}")
+        return "Désolé, j'ai eu un petit problème. Réessaie!"
+
+
+# ===== OLLAMA FALLBACK =====
+
+def call_ollama(messages: list) -> str:
+    """Call Ollama API directly — fast (~3-5s)."""
+    if not messages or messages[0].get("role") != "system":
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}] + messages
+
+    last_msg = ""
+    for m in reversed(messages):
+        if m.get("role") == "user":
+            last_msg = m.get("content", "").lower()
+            break
+
+    context_addon = fetch_live_context(last_msg)
+    if context_addon:
+        messages = messages + [{"role": "system", "content": f"Données en temps réel:\n{context_addon}"}]
+
+    payload = {
+        "model": OLLAMA_MODEL,
+        "messages": messages,
+        "stream": False,
+    }
+    log.info(f"Calling Ollama {OLLAMA_MODEL} with {len(messages)} messages")
+    resp = requests.post(f"{OLLAMA_URL}/api/chat", json=payload, timeout=45)
+    resp.raise_for_status()
+    data = resp.json()
+    return data.get("message", {}).get("content", "")
+
+
+def fetch_live_context(query: str) -> str:
+    """Fetch live data from VM tools based on user query keywords."""
+    context_parts = []
+    try:
+        if any(kw in query for kw in ["email", "courriel", "message", "inbox", "mail", "courrier"]):
+            result = subprocess.run(
+                ["gog", "gmail", "search", "newer_than:2d", "--max", "5", "--plain"],
+                capture_output=True, text=True, timeout=15
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                context_parts.append(f"Emails récents:\n{result.stdout.strip()[:800]}")
+
+        if any(kw in query for kw in ["météo", "weather", "temps", "dehors"]):
+            result = subprocess.run(
+                ["curl", "-s", "wttr.in/Quebec?format=3"],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                context_parts.append(f"Météo: {result.stdout.strip()}")
+
+        if any(kw in query for kw in ["agenda", "calendrier", "calendar", "rendez-vous", "meeting", "event", "semaine"]):
+            result = subprocess.run(
+                ["gog", "calendar", "events", "--max", "5", "--plain"],
+                capture_output=True, text=True, timeout=15
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                context_parts.append(f"Agenda:\n{result.stdout.strip()[:500]}")
+
+        if any(kw in query for kw in ["température", "maison", "capteur", "govee", "intérieur"]):
+            try:
+                ha_token = open(os.path.expanduser("~/.openclaw/secrets/ha-token")).read().strip()
+                resp = requests.get(
+                    "http://localhost:8123/api/states/sensor.govee_couloir_temperature",
+                    headers={"Authorization": f"Bearer {ha_token}"},
+                    timeout=3
+                )
+                if resp.ok:
+                    temp = resp.json().get("state", "?")
+                    context_parts.append(f"Température couloir: {temp}°C")
+            except Exception:
+                pass
+    except Exception as e:
+        log.warning(f"Live context fetch error: {e}")
+
+    return "\n".join(context_parts)
+
+
+# ===== API =====
 
 def verify_api_key(credentials: HTTPAuthorizationCredentials = Depends(security)):
     if credentials.credentials != AVATAR_BRIDGE_API_KEY:
@@ -100,12 +466,8 @@ def make_openai_response(content: str, model: str = "gbot") -> dict:
 
 
 def make_streaming_chunks(content: str, model: str = "gbot"):
-    """Generate SSE streaming chunks compatible with OpenAI streaming format.
-    Sends content character by character to let the LLM handler accumulate
-    and the TTS handler split by sentence naturally."""
+    """Generate SSE streaming chunks compatible with OpenAI streaming format."""
     chunk_id = f"chatcmpl-bridge-{int(time.time())}"
-    # Send content character by character — the LLM handler accumulates
-    # and the TTS handler splits on sentence boundaries (. ! ?)
     for char in content:
         chunk = {
             "id": chunk_id,
@@ -119,7 +481,6 @@ def make_streaming_chunks(content: str, model: str = "gbot"):
             }],
         }
         yield f"data: {json.dumps(chunk)}\n\n"
-    # Send final chunk
     final = {
         "id": chunk_id,
         "object": "chat.completion.chunk",
@@ -132,135 +493,17 @@ def make_streaming_chunks(content: str, model: str = "gbot"):
     yield "data: [DONE]\n\n"
 
 
-def call_ollama(messages: list) -> str:
-    """Call Ollama API directly — fast (~3-5s)."""
-    # Add system prompt if not present
-    if not messages or messages[0].get("role") != "system":
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}] + messages
-
-    # Check if user is asking for live data we can fetch
-    last_msg = ""
-    for m in reversed(messages):
-        if m.get("role") == "user":
-            last_msg = m.get("content", "").lower()
-            break
-
-    context_addon = fetch_live_context(last_msg)
-    if context_addon:
-        messages = messages + [{"role": "system", "content": f"Donn\u00e9es en temps r\u00e9el:\n{context_addon}"}]
-
-    payload = {
-        "model": OLLAMA_MODEL,
-        "messages": messages,
-        "stream": False,
-    }
-    log.info(f"Calling Ollama {OLLAMA_MODEL} with {len(messages)} messages")
-    resp = requests.post(f"{OLLAMA_URL}/api/chat", json=payload, timeout=45)
-    resp.raise_for_status()
-    data = resp.json()
-    return data.get("message", {}).get("content", "")
-
-
-def fetch_live_context(query: str) -> str:
-    """Fetch live data from VM tools based on user query keywords."""
-    context_parts = []
-    try:
-        # Bridge runs on the VM — call tools locally, no SSH needed
-        if any(kw in query for kw in ["email", "courriel", "message", "inbox", "mail", "courrier"]):
-            result = subprocess.run(
-                ["gog", "gmail", "search", "newer_than:2d", "--max", "5", "--plain"],
-                capture_output=True, text=True, timeout=15
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                context_parts.append(f"Emails r\u00e9cents:\n{result.stdout.strip()[:800]}")
-
-        if any(kw in query for kw in ["m\u00e9t\u00e9o", "weather", "temps", "dehors"]):
-            result = subprocess.run(
-                ["curl", "-s", "wttr.in/Quebec?format=3"],
-                capture_output=True, text=True, timeout=5
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                context_parts.append(f"M\u00e9t\u00e9o: {result.stdout.strip()}")
-
-        if any(kw in query for kw in ["agenda", "calendrier", "calendar", "rendez-vous", "meeting", "event", "semaine"]):
-            result = subprocess.run(
-                ["gog", "calendar", "events", "--max", "5", "--plain"],
-                capture_output=True, text=True, timeout=15
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                context_parts.append(f"Agenda:\n{result.stdout.strip()[:500]}")
-
-        if any(kw in query for kw in ["temp\u00e9rature", "maison", "capteur", "govee", "int\u00e9rieur"]):
-            try:
-                ha_token = open(os.path.expanduser("~/.openclaw/secrets/ha-token")).read().strip()
-                resp = requests.get(
-                    "http://localhost:8123/api/states/sensor.govee_couloir_temperature",
-                    headers={"Authorization": f"Bearer {ha_token}"},
-                    timeout=3
-                )
-                if resp.ok:
-                    temp = resp.json().get("state", "?")
-                    context_parts.append(f"Temp\u00e9rature couloir: {temp}\u00b0C")
-            except Exception:
-                pass
-    except Exception as e:
-        log.warning(f"Live context fetch error: {e}")
-
-    return "\n".join(context_parts)
-
-
-def call_openclaw(message: str) -> str:
-    """Call OpenClaw agent CLI — uses avatar agent with native tool calls."""
-    try:
-        if SSH_HOST:
-            ssh_cmd = ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes"]
-            if SSH_KEY:
-                ssh_cmd += ["-i", SSH_KEY]
-            ssh_cmd += [
-                f"{SSH_USER}@{SSH_HOST}",
-                f"openclaw agent --to {OPENCLAW_SESSION_ID} --message {json.dumps(message)} --json"
-            ]
-            result = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=120)
-        else:
-            result = subprocess.run(
-                ["openclaw", "agent", "--agent", "avatar", "--thinking", "off", "--message", message, "--json"],
-                capture_output=True, text=True, timeout=120,
-            )
-    except subprocess.TimeoutExpired:
-        return "Désolé, le temps de réponse a été trop long."
-    except Exception as e:
-        return f"Erreur: {str(e)}"
-
-    if result.returncode != 0:
-        return "Désolé, je n'ai pas pu traiter ta demande."
-
-    try:
-        raw_output = result.stdout.strip()
-        openclaw_data = None
-        for line in reversed(raw_output.splitlines()):
-            line = line.strip()
-            if line.startswith("{"):
-                try:
-                    openclaw_data = json.loads(line)
-                    break
-                except json.JSONDecodeError:
-                    continue
-        if openclaw_data is None:
-            openclaw_data = json.loads(raw_output)
-
-        if "result" in openclaw_data:
-            payloads = openclaw_data["result"].get("payloads", [])
-            if payloads:
-                # Take the LAST payload (final answer after tool calls)
-                return payloads[-1].get("text", "")
-        return openclaw_data.get("response") or openclaw_data.get("text") or str(openclaw_data)
-    except json.JSONDecodeError:
-        return result.stdout.strip()
+@app.on_event("startup")
+async def startup():
+    if LLM_MODE == "openclaw":
+        _start_gateway_thread()
+        log.info("[Bridge] Gateway thread started")
 
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "safe_mode": AVATAR_SAFE_MODE, "llm_mode": LLM_MODE}
+    gw_status = "connected" if (_gateway and _gateway.connected) else "disconnected"
+    return {"status": "ok", "safe_mode": AVATAR_SAFE_MODE, "llm_mode": LLM_MODE, "gateway": gw_status}
 
 
 @app.get("/v1/models")
@@ -298,11 +541,10 @@ async def chat_completions(request: Request, api_key: str = Depends(verify_api_k
             response_text = call_openclaw(last_user_message)
     except Exception as e:
         log.error(f"LLM call failed: {e}")
-        response_text = "D\u00e9sol\u00e9, j'ai eu un petit probl\u00e8me. R\u00e9essaie!"
+        response_text = "Désolé, j'ai eu un petit problème. Réessaie!"
 
     log.info(f"Response in {time.time() - t0:.1f}s: '{response_text[:100]}...'")
 
-    # Check if client wants streaming
     stream = body.get("stream", False)
     if stream:
         return StreamingResponse(
