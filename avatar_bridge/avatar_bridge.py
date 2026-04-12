@@ -210,7 +210,14 @@ def fetch_live_context(query: str) -> str:
 
 
 def call_openclaw(message: str) -> str:
-    """Call OpenClaw agent CLI — slow (~30-60s) but full G-Bot context."""
+    """Call OpenClaw agent CLI with pre-fetched live context."""
+    # Pre-fetch live data and inject into the message so the agent has it
+    context = fetch_live_context(message.lower())
+    enriched_message = message
+    if context:
+        enriched_message = f"{message}\n\n[Données temps réel pré-chargées — utilise-les directement dans ta réponse, ne dis pas que tu vas les chercher:]\n{context}"
+        log.info(f"Enriched message with live context ({len(context)} chars)")
+
     try:
         if SSH_HOST:
             ssh_cmd = ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes"]
@@ -218,12 +225,12 @@ def call_openclaw(message: str) -> str:
                 ssh_cmd += ["-i", SSH_KEY]
             ssh_cmd += [
                 f"{SSH_USER}@{SSH_HOST}",
-                f"openclaw agent --to {OPENCLAW_SESSION_ID} --message {json.dumps(message)} --json"
+                f"openclaw agent --to {OPENCLAW_SESSION_ID} --message {json.dumps(enriched_message)} --json"
             ]
             result = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=120)
         else:
             result = subprocess.run(
-                ["openclaw", "agent", "--agent", "avatar", "--session-id", "avatar-voice", "--thinking", "off", "--message", message, "--json"],
+                ["openclaw", "agent", "--agent", "avatar", "--session-id", "avatar-voice", "--thinking", "off", "--message", enriched_message, "--json"],
                 capture_output=True, text=True, timeout=120,
             )
     except subprocess.TimeoutExpired:
