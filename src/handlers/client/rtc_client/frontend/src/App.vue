@@ -35,6 +35,22 @@ function toggleTheme() {
   applyTheme(next[theme.value])
 }
 
+async function newSession() {
+  try {
+    // Call bridge API to reset session
+    // Bridge runs on the LLM API URL (port 9000)
+    const bridgeUrl = 'http://10.0.0.253:9000'
+    const res = await fetch(`${bridgeUrl}/api/new-session`, { method: 'POST' })
+    if (res.ok) {
+      // Reload the page to get a fresh WebRTC connection
+      window.location.reload()
+    }
+  } catch (e) {
+    console.error('New session failed:', e)
+    window.location.reload()
+  }
+}
+
 onMounted(() => {
   const saved = localStorage.getItem('theme') as Theme | null
   applyTheme(saved || 'dark')
@@ -46,7 +62,11 @@ onMounted(() => {
       <WebcamPermission v-if="!videoChatState.webcamAccessed" />
       <VideoChat />
     </div>
-    <button class="theme-toggle" @click="toggleTheme" :title="`Theme: ${theme}`">
+    <div class="top-controls">
+    <button class="control-btn new-session-btn" @click="newSession" title="New Session">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
+    </button>
+    <button class="control-btn theme-toggle" @click="toggleTheme" :title="`Theme: ${theme}`">
       <!-- sun icon for light theme -->
       <svg v-if="theme === 'light'" viewBox="0 0 24 24" fill="currentColor" width="16" height="16"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M2 12h2M20 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" stroke="currentColor" stroke-width="2" stroke-linecap="round" fill="none"/></svg>
       <!-- moon icon for dark theme -->
@@ -54,6 +74,7 @@ onMounted(() => {
       <!-- monitor icon for system theme -->
       <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
     </button>
+    </div>
   </ConfigProvider>
 </template>
 <style lang="less" scoped>
@@ -66,11 +87,16 @@ onMounted(() => {
   }
 }
 
-.theme-toggle {
+.top-controls {
   position: fixed;
   top: 16px;
   right: 16px;
   z-index: 1000;
+  display: flex;
+  gap: 8px;
+}
+
+.control-btn {
   width: 36px;
   height: 36px;
   border-radius: 50%;

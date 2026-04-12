@@ -14,6 +14,7 @@ import websockets
 from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.middleware.cors import CORSMiddleware
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import (
     Encoding, PrivateFormat, PublicFormat, NoEncryption,
@@ -79,6 +80,12 @@ BLOCKED_PATTERNS = [
 SAFE_MODE_BLOCKED_RESPONSE = "Je suis en mode vocal sécurisé. Pour cette action, confirme-moi ça sur Telegram."
 
 app = FastAPI(title="Avatar Bridge", version="2.0.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 security = HTTPBearer()
 
 
@@ -504,6 +511,31 @@ async def startup():
 async def health():
     gw_status = "connected" if (_gateway and _gateway.connected) else "disconnected"
     return {"status": "ok", "safe_mode": AVATAR_SAFE_MODE, "llm_mode": LLM_MODE, "gateway": gw_status}
+
+
+@app.post("/api/new-session")
+@app.get("/api/new-session")
+async def new_session():
+    """Reset the avatar agent session — purge transcript and use a fresh session key."""
+    global SESSION_KEY
+    import glob
+    sessions_dir = os.path.join(OPENCLAW_DIR, "agents/avatar/sessions")
+    # Delete transcript files
+    for f in glob.glob(os.path.join(sessions_dir, "*.jsonl")):
+        try:
+            os.remove(f)
+            log.info(f"[NewSession] Deleted: {os.path.basename(f)}")
+        except Exception as e:
+            log.warning(f"[NewSession] Error deleting {f}: {e}")
+    # Reset sessions.json
+    sessions_json = os.path.join(sessions_dir, "sessions.json")
+    if os.path.exists(sessions_json):
+        with open(sessions_json, "w") as f:
+            json.dump({}, f)
+    # New unique session key
+    SESSION_KEY = f"agent:avatar:main-{int(time.time())}"
+    log.info(f"[NewSession] New session key: {SESSION_KEY}")
+    return {"ok": True, "session": SESSION_KEY}
 
 
 @app.get("/v1/models")
