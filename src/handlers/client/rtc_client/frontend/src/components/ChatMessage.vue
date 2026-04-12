@@ -20,20 +20,19 @@ const props = withDefaults(
 <style scoped lang="less">
 .answer-message-container {
   padding: 6px 12px;
-  background: rgba(255, 255, 255, 0.8);
+  background: var(--bg-glass);
   border-radius: 12px;
-  color: #26244c;
+  color: var(--text-primary);
 
   &.human {
-    background: #dddddd99;
-    // margin-left: 20px;
+    background: var(--message-human-bg);
+    color: var(--message-human-text);
     margin-right: 0;
   }
 
   &.avatar {
     background: #9189fa;
     color: #ffffff;
-    // margin-right: 20px;
   }
 }
 </style>

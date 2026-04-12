@@ -7,7 +7,7 @@ import zh from './zh'
 
 type SupportLocale = keyof typeof messages
 
-export const locale = ref<SupportLocale>('zh')
+export const locale = ref<SupportLocale>('en')
 export const antdLocale: Record<SupportLocale, any> = {
   zh: zhCN,
   en: enUS,

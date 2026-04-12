@@ -14,7 +14,7 @@ onMounted(() => {
   // accessClick(); //自动获取权限
 });
 
-const text = 'Cliquer pour autoriser la cam\u00e9ra et le micro';
+const text = 'Click to allow camera and microphone';
 </script>
 
 <template>

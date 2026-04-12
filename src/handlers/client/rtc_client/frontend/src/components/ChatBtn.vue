@@ -9,14 +9,14 @@
       @click="onStartChat"
     >
       <template v-if="streamState === StreamState.closed">
-        <span>Commencer la conversation</span>
+        <span>Start Conversation</span>
       </template>
       <template v-else-if="streamState === StreamState.waiting">
         <div class="waiting-icon-text">
           <div class="icon" title="spinner">
             <Spin wrapperClassName="spin-icon"></Spin>
           </div>
-          <span>Connexion</span>
+          <span>Connecting</span>
         </div>
       </template>
       <template v-else>

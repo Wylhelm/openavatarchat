@@ -94,18 +94,17 @@ function onInterrupt() {
 
   .chat-input-inner {
     padding: 0 12px;
-    background-color: #fff;
+    background-color: var(--input-bg);
     height: 64px;
     flex: 1;
     display: flex;
     align-items: center;
-    border: 1px solid #e8eaf2;
-    border-radius: 12px;
+    border: 1px solid var(--input-border);
     border-radius: 20px;
-    box-shadow:
-      0 12px 24px -16px rgba(54, 54, 73, 0.04),
-      0 12px 40px 0 rgba(51, 51, 71, 0.08),
-      0 0 1px 0 rgba(44, 44, 54, 0.02);
+    box-shadow: var(--shadow);
+    transition:
+      background-color 0.3s ease,
+      border-color 0.3s ease;
 
     .chat-input-wrapper {
       flex: 1;
@@ -117,7 +116,8 @@ function onInterrupt() {
         width: 100%;
         border: none;
         outline: none;
-        color: #26244c;
+        color: var(--input-text);
+        background: transparent;
         font-size: 16px;
         font-weight: 400;
         resize: none;

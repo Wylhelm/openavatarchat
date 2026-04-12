@@ -1,9 +1,66 @@
+:root {
+  --bg-primary: #0a0a0f;
+  --bg-secondary: #12121a;
+  --bg-surface: #1a1a2e;
+  --bg-glass: rgba(255, 255, 255, 0.05);
+  --text-primary: #ffffff;
+  --text-secondary: rgba(255, 255, 255, 0.6);
+  --border-color: rgba(255, 255, 255, 0.1);
+  --input-bg: #1a1a2e;
+  --input-border: rgba(255, 255, 255, 0.15);
+  --input-text: #ffffff;
+  --shadow: 0 12px 40px rgba(0, 0, 0, 0.4);
+  --accent: #7873f6;
+  --message-human-bg: rgba(255, 255, 255, 0.12);
+  --message-human-text: #ffffff;
+}
+
+[data-theme='light'] {
+  --bg-primary: #f4f4f8;
+  --bg-secondary: #eaeaf0;
+  --bg-surface: #ffffff;
+  --bg-glass: rgba(0, 0, 0, 0.04);
+  --text-primary: #1a1a2e;
+  --text-secondary: rgba(26, 26, 46, 0.6);
+  --border-color: rgba(0, 0, 0, 0.12);
+  --input-bg: #ffffff;
+  --input-border: #e8eaf2;
+  --input-text: #26244c;
+  --shadow: 0 12px 40px rgba(0, 0, 0, 0.08);
+  --accent: #7873f6;
+  --message-human-bg: #ededf5;
+  --message-human-text: #26244c;
+}
+
+@media (prefers-color-scheme: light) {
+  [data-theme='system'] {
+    --bg-primary: #f4f4f8;
+    --bg-secondary: #eaeaf0;
+    --bg-surface: #ffffff;
+    --bg-glass: rgba(0, 0, 0, 0.04);
+    --text-primary: #1a1a2e;
+    --text-secondary: rgba(26, 26, 46, 0.6);
+    --border-color: rgba(0, 0, 0, 0.12);
+    --input-bg: #ffffff;
+    --input-border: #e8eaf2;
+    --input-text: #26244c;
+    --shadow: 0 12px 40px rgba(0, 0, 0, 0.08);
+    --accent: #7873f6;
+    --message-human-bg: #ededf5;
+    --message-human-text: #26244c;
+  }
+}
+
 body {
   margin: 0;
   overflow-y: auto;
-  background-color: #18181b;
-  color: #ffffff;
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  transition:
+    background-color 0.3s ease,
+    color 0.3s ease;
 }
+
 * {
   box-sizing: border-box;
   -webkit-touch-callout: none;
@@ -15,6 +72,7 @@ body {
 img {
   pointer-events: none;
 }
+
 #app {
   width: 100vw;
   height: 100vh;
