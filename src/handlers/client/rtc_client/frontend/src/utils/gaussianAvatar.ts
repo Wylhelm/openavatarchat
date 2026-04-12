@@ -109,9 +109,25 @@ export class GaussianAvatar extends EventEmitter {
         getExpressionData: this.getArkitFaceFrame.bind(this),
         downloadProgress: this._downloadProgress.bind(this),
         loadProgress: this._loadProgress.bind(this),
-        backgroundColor: '0x0a0a0f',
+        backgroundColor: (() => {
+          const theme = document.documentElement.getAttribute('data-theme') || 'dark'
+          const isLight = theme === 'light' || (theme === 'system' && window.matchMedia('(prefers-color-scheme: light)').matches)
+          return isLight ? '0xf4f4f8' : '0x0a0a0f'
+        })(),
       },
     )
+  }
+  setBackgroundColor(hexColor: string) {
+    try {
+      const color = parseInt(hexColor.replace(/^(#|0x)/, ''), 16)
+      if (this._renderer?.viewer?.renderer) {
+        this._renderer.viewer.renderer.setClearColor(color, 1.0)
+        this._renderer.viewer.backgroundColor = color
+        this._renderer.viewer.forceRenderNextFrame()
+      }
+    } catch (e) {
+      console.warn('Failed to set avatar background color:', e)
+    }
   }
   setAvatarMute(isMute: boolean) {
     this._processor.setMute(isMute)

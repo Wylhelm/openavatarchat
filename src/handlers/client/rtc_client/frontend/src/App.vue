@@ -12,10 +12,22 @@ videoChatState.init()
 type Theme = 'dark' | 'light' | 'system'
 const theme = ref<Theme>('dark')
 
+function getEffectiveTheme(t: Theme): 'dark' | 'light' {
+  if (t !== 'system') return t
+  return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'
+}
+
 function applyTheme(t: Theme) {
   document.documentElement.setAttribute('data-theme', t)
   localStorage.setItem('theme', t)
   theme.value = t
+  // Update 3D avatar background to match theme
+  const effective = getEffectiveTheme(t)
+  const bgColor = effective === 'dark' ? '0x0a0a0f' : '0xf4f4f8'
+  const renderer = videoChatState.localAvatarRenderer
+  if (renderer && typeof renderer.setBackgroundColor === 'function') {
+    renderer.setBackgroundColor(bgColor)
+  }
 }
 
 function toggleTheme() {
