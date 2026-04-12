@@ -109,7 +109,7 @@ export class GaussianAvatar extends EventEmitter {
         getExpressionData: this.getArkitFaceFrame.bind(this),
         downloadProgress: this._downloadProgress.bind(this),
         loadProgress: this._loadProgress.bind(this),
-        backgroundColor: '0a0a0f',
+        backgroundColor: '0x0a0a0f',
       },
     )
   }
