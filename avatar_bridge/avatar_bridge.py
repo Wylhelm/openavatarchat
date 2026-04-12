@@ -210,14 +210,7 @@ def fetch_live_context(query: str) -> str:
 
 
 def call_openclaw(message: str) -> str:
-    """Call OpenClaw agent CLI with pre-fetched live context."""
-    # Pre-fetch live data and inject into the message so the agent has it
-    context = fetch_live_context(message.lower())
-    enriched_message = message
-    if context:
-        enriched_message = f"{message}\n\n[Données temps réel pré-chargées — utilise-les directement dans ta réponse, ne dis pas que tu vas les chercher:]\n{context}"
-        log.info(f"Enriched message with live context ({len(context)} chars)")
-
+    """Call OpenClaw agent CLI — uses avatar agent with native tool calls."""
     try:
         if SSH_HOST:
             ssh_cmd = ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes"]
@@ -225,12 +218,12 @@ def call_openclaw(message: str) -> str:
                 ssh_cmd += ["-i", SSH_KEY]
             ssh_cmd += [
                 f"{SSH_USER}@{SSH_HOST}",
-                f"openclaw agent --to {OPENCLAW_SESSION_ID} --message {json.dumps(enriched_message)} --json"
+                f"openclaw agent --to {OPENCLAW_SESSION_ID} --message {json.dumps(message)} --json"
             ]
             result = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=120)
         else:
             result = subprocess.run(
-                ["openclaw", "agent", "--agent", "avatar", "--session-id", "avatar-voice", "--thinking", "off", "--message", enriched_message, "--json"],
+                ["openclaw", "agent", "--agent", "avatar", "--thinking", "off", "--message", message, "--json"],
                 capture_output=True, text=True, timeout=120,
             )
     except subprocess.TimeoutExpired:
@@ -258,7 +251,8 @@ def call_openclaw(message: str) -> str:
         if "result" in openclaw_data:
             payloads = openclaw_data["result"].get("payloads", [])
             if payloads:
-                return payloads[0].get("text", "")
+                # Take the LAST payload (final answer after tool calls)
+                return payloads[-1].get("text", "")
         return openclaw_data.get("response") or openclaw_data.get("text") or str(openclaw_data)
     except json.JSONDecodeError:
         return result.stdout.strip()
