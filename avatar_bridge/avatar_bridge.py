@@ -120,7 +120,19 @@ def load_or_generate_identity() -> dict:
 def load_gateway_token() -> str:
     with open(OPENCLAW_CONFIG_PATH) as f:
         config = json.load(f)
-    return config["gateway"]["auth"]["token"]
+    token = config["gateway"]["auth"]["token"]
+    # Newer OpenClaw configs store token as a dict reference to a secrets file
+    if isinstance(token, dict):
+        token_id = token.get("id", "")  # e.g. "/gateway/auth/token"
+        # Convert path-style id to secrets filename: /gateway/auth/token -> gateway-auth-token
+        filename = token_id.strip("/").replace("/", "-")
+        token_path = os.path.join(OPENCLAW_DIR, "secrets", filename)
+        if os.path.exists(token_path):
+            with open(token_path) as tf:
+                return tf.read().strip()
+        # Fallback: some configs use a different secrets filename pattern
+        raise ValueError(f"Unsupported token reference: {token}")
+    return token
 
 
 def sign_challenge(identity: dict, gateway_token: str, nonce: str) -> tuple[str, int]:
@@ -192,7 +204,7 @@ class GatewayManager:
             connect_msg = {
                 "type": "req", "id": "conn_1", "method": "connect",
                 "params": {
-                    "minProtocol": 3, "maxProtocol": 3,
+                    "minProtocol": 3, "maxProtocol": 4,
                     "client": {"id": "cli", "version": "1.0.0", "platform": "python", "mode": "cli"},
                     "role": "operator",
                     "scopes": ["operator.read", "operator.write"],
@@ -258,6 +270,13 @@ class GatewayManager:
             if fut is None or fut.done():
                 return
 
+            # chat error state → resolve with error message
+            if ev == "chat" and payload.get("state") == "error":
+                err_msg = payload.get("errorMessage", "Gateway error")
+                log.error(f"[Bridge] Gateway chat error: {err_msg}")
+                self._resolve(req_id, f"Désolé, j'ai eu un problème technique. {err_msg[:50]}")
+                return
+
             # chat final state → resolve immediately
             if ev == "chat" and payload.get("state") == "final":
                 content = payload.get("message", {}).get("content", [])
@@ -275,9 +294,16 @@ class GatewayManager:
                 return
 
             # Accumulate assistant text (cumulative from gateway)
+            # Protocol v4: deltaText carries the delta, message.content is the cumulative snapshot
             if ev == "agent" and payload.get("stream") == "assistant":
-                text_delta = payload.get("data", {}).get("text")
-                if text_delta:
+                data = payload.get("data", {})
+                text_delta = data.get("text")
+                delta_text = data.get("deltaText")
+                if delta_text is not None:
+                    # v4 delta mode: accumulate
+                    self.pending_text[req_id] = self.pending_text.get(req_id, "") + delta_text
+                elif text_delta is not None:
+                    # v3 cumulative mode: replace
                     self.pending_text[req_id] = text_delta
                 return
 
@@ -294,7 +320,7 @@ class GatewayManager:
         if fut and not fut.done():
             fut.set_result(text)
 
-    async def send(self, message: str, timeout: float = 120.0) -> str:
+    async def send(self, message: str, timeout: float = 120.0, attachments: list = None) -> str:
         """Send a message and wait for the complete agent response."""
         if not self.connected or self.ws is None:
             raise RuntimeError("Gateway not connected")
@@ -305,13 +331,17 @@ class GatewayManager:
         self.pending[req_id] = fut
         self.pending_text[req_id] = ""
 
+        params = {
+            "sessionKey": SESSION_KEY,
+            "message": message,
+            "idempotencyKey": req_id,
+        }
+        if attachments:
+            params["attachments"] = attachments
+
         await self.ws.send(json.dumps({
             "type": "req", "id": req_id, "method": "chat.send",
-            "params": {
-                "sessionKey": SESSION_KEY,
-                "message": message,
-                "idempotencyKey": req_id,
-            },
+            "params": params,
         }))
         log.info(f"[Gateway] → chat.send ({req_id[:20]}...)")
 
@@ -343,7 +373,7 @@ def _start_gateway_thread():
     t.start()
 
 
-def call_openclaw(message: str) -> str:
+def call_openclaw(message: str, attachments: list = None) -> str:
     """Call openclaw agent via persistent WebSocket gateway — full multi-turn with tools."""
     if _gateway is None or _gateway_loop is None:
         return "Désolé, le gateway n'est pas disponible."
@@ -358,7 +388,9 @@ def call_openclaw(message: str) -> str:
             return "Désolé, je ne peux pas me connecter au serveur."
 
     try:
-        future = asyncio.run_coroutine_threadsafe(_gateway.send(message, timeout=120.0), _gateway_loop)
+        future = asyncio.run_coroutine_threadsafe(
+            _gateway.send(message, timeout=120.0, attachments=attachments), _gateway_loop
+        )
         result = future.result(timeout=125.0)
         return result or "Désolé, je n'ai pas reçu de réponse."
     except Exception as e:
@@ -552,17 +584,44 @@ async def chat_completions(request: Request, api_key: str = Depends(verify_api_k
     messages = body.get("messages", [])
 
     last_user_message = None
+    attachments = []
     for msg in reversed(messages):
         if msg.get("role") == "user":
-            last_user_message = msg.get("content", "")
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                last_user_message = content
+            elif isinstance(content, list):
+                # Multimodal OpenAI format: extract text and images separately
+                text_parts = []
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    btype = block.get("type")
+                    if btype == "text":
+                        text_parts.append(block.get("text", ""))
+                    elif btype == "image_url":
+                        image_url = block.get("image_url", {})
+                        url = image_url.get("url", "") if isinstance(image_url, dict) else ""
+                        if url:
+                            mime_type = "image/jpeg"
+                            if url.startswith("data:"):
+                                # data:image/jpeg;base64,... -> extract mime
+                                header, _, _ = url.partition(",")
+                                if ";" in header:
+                                    mime_type = header[len("data:"):header.index(";")]
+                            attachments.append({"content": url, "mimeType": mime_type})
+                last_user_message = " ".join(text_parts).strip() or ""
             break
 
-    if last_user_message is None:
+    if last_user_message is None or (last_user_message == "" and not attachments):
         raise HTTPException(status_code=400, detail="No user message found")
 
-    log.info(f"Received: '{last_user_message}' (mode={LLM_MODE})")
+    if attachments:
+        log.info(f"Received (multimodal): '{last_user_message[:60]}...' with {len(attachments)} image(s) (mode={LLM_MODE})")
+    else:
+        log.info(f"Received: '{last_user_message}' (mode={LLM_MODE})")
 
-    if AVATAR_SAFE_MODE and is_message_blocked(last_user_message):
+    if AVATAR_SAFE_MODE and last_user_message and is_message_blocked(last_user_message):
         return JSONResponse(content=make_openai_response(SAFE_MODE_BLOCKED_RESPONSE))
 
     t0 = time.time()
@@ -570,7 +629,7 @@ async def chat_completions(request: Request, api_key: str = Depends(verify_api_k
         if LLM_MODE == "ollama":
             response_text = call_ollama(messages)
         else:
-            response_text = call_openclaw(last_user_message)
+            response_text = call_openclaw(last_user_message, attachments=attachments)
     except Exception as e:
         log.error(f"LLM call failed: {e}")
         response_text = "Désolé, j'ai eu un petit problème. Réessaie!"
