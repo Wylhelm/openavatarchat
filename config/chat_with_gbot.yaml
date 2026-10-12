@@ -12,16 +12,17 @@ default:
     model_root: "models"
     concurrent_limit: 5
     turn_config:
-      turn_provider: "stun_server"
-      stun_urls:
-        - "stun:stun.l.google.com:19302"
-        - "stun:stun1.l.google.com:19302"
+      turn_provider: "turn_server"
+      urls:
+        - "turn:10.0.0.175:3478?transport=udp"
+      username: "avatar"
+      credential: "kqvc6rjn9suai83l02pgbfw7"
     handler_search_path:
       - "src/handlers"
     handler_configs:
       LamClient:
         module: client/h5_rendering_client/client_handler_lam
-        asset_path: "lam_samples/inessas2.zip"
+        asset_path: "lam_samples/gbot.zip"
         # max time a session will last for
         connection_ttl: 900
       SileroVad:
@@ -43,10 +44,12 @@ default:
         voice: "Chandra MacFarland"
         language: "fr"
       LLMOpenAICompatible:
+        max_tokens: 500
         enabled: True
         module: llm/openai_compatible/llm_handler_openai_compatible
         model_name: "gbot"
         history_length: 12
+        enable_video_input: True # ensure your llm (the gbot bridge) supports image_url inputs
         # G-Bot system prompt is managed by the bridge
         system_prompt: ""
         api_url: "http://10.0.0.253:9000/v1"

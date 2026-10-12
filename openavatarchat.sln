@@ -1,0 +1,47 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.5.2.0
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{827E0CD3-B72D-47B6-A68D-7590B98EB39B}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "handlers", "handlers", "{41265402-8ADA-1BB0-B25C-803F251BCFCA}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "vad", "vad", "{7FFC7EE6-C717-516A-C0C9-7A84C463652B}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "silerovad", "silerovad", "{3916CAE6-DC66-07A8-7A8B-300E9B517766}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "silero_vad", "silero_vad", "{B5E45699-8117-72EF-8365-FF5EBCB80EB3}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "examples", "examples", "{F975BB7A-B5C8-157D-433B-E7AE71362EC6}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "csharp", "csharp", "{9B7374D4-F49B-5FF8-81B8-F8687CD68772}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "VadDotNet", "src\handlers\vad\silerovad\silero_vad\examples\csharp\VadDotNet.csproj", "{C256A11C-C09A-975D-5F7A-94077F4CB401}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{C256A11C-C09A-975D-5F7A-94077F4CB401}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{C256A11C-C09A-975D-5F7A-94077F4CB401}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{C256A11C-C09A-975D-5F7A-94077F4CB401}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{C256A11C-C09A-975D-5F7A-94077F4CB401}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{41265402-8ADA-1BB0-B25C-803F251BCFCA} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
+		{7FFC7EE6-C717-516A-C0C9-7A84C463652B} = {41265402-8ADA-1BB0-B25C-803F251BCFCA}
+		{3916CAE6-DC66-07A8-7A8B-300E9B517766} = {7FFC7EE6-C717-516A-C0C9-7A84C463652B}
+		{B5E45699-8117-72EF-8365-FF5EBCB80EB3} = {3916CAE6-DC66-07A8-7A8B-300E9B517766}
+		{F975BB7A-B5C8-157D-433B-E7AE71362EC6} = {B5E45699-8117-72EF-8365-FF5EBCB80EB3}
+		{9B7374D4-F49B-5FF8-81B8-F8687CD68772} = {F975BB7A-B5C8-157D-433B-E7AE71362EC6}
+		{C256A11C-C09A-975D-5F7A-94077F4CB401} = {9B7374D4-F49B-5FF8-81B8-F8687CD68772}
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {1451F96B-5D90-4493-93C3-128E72389639}
+	EndGlobalSection
+EndGlobal
