@@ -32,6 +32,8 @@ if not AVATAR_BRIDGE_API_KEY:
     sys.exit(1)
 
 AVATAR_SAFE_MODE = os.environ.get("AVATAR_SAFE_MODE", "true").lower() in ("true", "1", "yes")
+# The openclaw gateway never receives SYSTEM_PROMPT, so the emotion rule is sent with each message
+AVATAR_EMOTION_TAGS = os.environ.get("AVATAR_EMOTION_TAGS", "true").lower() in ("true", "1", "yes")
 PORT = int(os.environ.get("PORT", "9000"))
 
 # LLM backend: "openclaw" (full G-Bot context) or "ollama" (fast but no tools)
@@ -44,6 +46,8 @@ OPENCLAW_CONFIG_PATH = os.environ.get("OPENCLAW_CONFIG_PATH", os.path.expanduser
 OPENCLAW_DIR = os.path.dirname(OPENCLAW_CONFIG_PATH)
 IDENTITY_PATH = os.path.join(OPENCLAW_DIR, "agents/avatar/device-identity.json")
 SESSION_KEY = "agent:avatar:main"
+
+EMOTION_RULE = """RÈGLE ÉMOTION: Préfixe TOUJOURS ta réponse par un tag d'émotion entre crochets, suivi du texte. Format exact : [EMOTION] texte. EMOTION ∈ {neutre, joie, surprise, tristesse, colere, reflexion}. Choisis l'émotion selon le ton de TA réponse ET ce que tu vois à la caméra. Exemples : [joie] Bonjour Guillaume, ça me fait plaisir de te voir ! [surprise] Oh, tu as changé de coiffure ! [neutre] Il est 14h, tu as une réunion dans 30 minutes. Le tag est retiré avant la synthèse vocale, il sert uniquement à animer ton visage."""
 
 SYSTEM_PROMPT = """Tu es G-Bot, l'assistant personnel de Guillaume Gagnon.
 Tu es en mode avatar vocal — tes réponses doivent être courtes (1-3 phrases), naturelles, comme une conversation parlée. Pas de markdown, pas de listes, juste du texte parlé.
@@ -69,7 +73,7 @@ RÈGLE DE SÉCURITÉ: Tu ne peux PAS exécuter d'actions (envoyer emails, allume
 
 RÈGLE VOCALE: Réponds TOUJOURS en français sauf si Guillaume parle en anglais. Maximum 2-3 phrases.
 
-RÈGLE ÉMOTION: Préfixe TOUJOURS ta réponse par un tag d'émotion entre crochets, suivi du texte. Format exact : [EMOTION] texte. EMOTION ∈ {neutre, joie, surprise, tristesse, colere, reflexion}. Choisis l'émotion selon le ton de TA réponse ET ce que tu vois à la caméra. Exemples : [joie] Bonjour Guillaume, ça me fait plaisir de te voir ! [surprise] Oh, tu as changé de coiffure ! [neutre] Il est 14h, tu as une réunion dans 30 minutes. Le tag est retiré avant la synthèse vocale, il sert uniquement à animer ton visage."""
+""" + EMOTION_RULE
 
 BLOCKED_PATTERNS = [
     "rm ", "rm -", "mv ", "docker rm", "docker stop", "sudo ",
@@ -631,7 +635,10 @@ async def chat_completions(request: Request, api_key: str = Depends(verify_api_k
         if LLM_MODE == "ollama":
             response_text = call_ollama(messages)
         else:
-            response_text = call_openclaw(last_user_message, attachments=attachments)
+            openclaw_message = last_user_message
+            if AVATAR_EMOTION_TAGS:
+                openclaw_message = f"{EMOTION_RULE}\n\n{last_user_message}"
+            response_text = call_openclaw(openclaw_message, attachments=attachments)
     except Exception as e:
         log.error(f"LLM call failed: {e}")
         response_text = "Désolé, j'ai eu un petit problème. Réessaie!"

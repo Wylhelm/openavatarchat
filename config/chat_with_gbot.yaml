@@ -56,3 +56,5 @@ default:
         api_key: "${AVATAR_BRIDGE_API_KEY}"
       LAM_Driver:
         module: avatar/lam/avatar_handler_lam_audio2expression
+        emotion_weight: 0.6 # 0 disables facial emotions from the [emotion] tag
+        emotion_ramp_seconds: 0.3

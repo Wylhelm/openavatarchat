@@ -15,6 +15,7 @@ from chat_engine.data_models.chat_data_type import ChatDataType
 from chat_engine.contexts.session_context import SessionContext
 from chat_engine.data_models.runtime_data.data_bundle import DataBundle, DataBundleDefinition, DataBundleEntry
 from handlers.llm.openai_compatible.chat_history_manager import ChatHistory, HistoryMessage
+from handlers.avatar.emotion.emotion_tag import EmotionTagStreamParser, strip_emotion_tags
 
 
 # Removed complex filtering - let the LLM and TTS work naturally
@@ -46,6 +47,7 @@ class LLMContext(HandlerContext):
         self.current_image = None
         self.history = None
         self.enable_video_input = False
+        self.shared_states = None
 
 
 class HandlerLLM(HandlerBase, ABC):
@@ -97,6 +99,7 @@ class HandlerLLM(HandlerBase, ABC):
         context.api_url = handler_config.api_url
         context.enable_video_input = handler_config.enable_video_input
         context.history = ChatHistory(history_length=handler_config.history_length)
+        context.shared_states = session_context.shared_states
         context.client = OpenAI(
             api_key=context.api_key,
             base_url=context.api_url,
@@ -194,6 +197,12 @@ class HandlerLLM(HandlerBase, ABC):
         
         return result.strip()
 
+    @staticmethod
+    def _publish_emotion(context: LLMContext, speech_id: str, emotion: str):
+        logger.info(f"Avatar emotion for {speech_id}: {emotion}")
+        if context.shared_states is not None:
+            context.shared_states.set_avatar_emotion(speech_id, emotion)
+
     def handle(self, context: HandlerContext, inputs: ChatData,
                output_definitions: Dict[ChatDataType, HandlerDataInfo]):
         output_definition = output_definitions.get(ChatDataType.AVATAR_TEXT).definition
@@ -227,6 +236,7 @@ class HandlerLLM(HandlerBase, ABC):
         logger.info(f'LLM input: {chat_text}')
         current_content = context.history.generate_next_messages(chat_text, 
                                                                  [context.current_image] if context.current_image is not None else [])
+        tag_parser = EmotionTagStreamParser()
         try:
             # Get temperature and max_tokens from config if available
             temperature = getattr(context.config, 'temperature', 0.7)
@@ -262,7 +272,12 @@ class HandlerLLM(HandlerBase, ABC):
                             if len(set(last_5_words)) == 1:  # All words are identical
                                 logger.warning(f"Stopping LLM stream due to word repetition: '{last_5_words[0]}'")
                                 break
-                    
+
+                    output_text, emotion_resolved = tag_parser.feed(output_text)
+                    if emotion_resolved:
+                        self._publish_emotion(context, speech_id, tag_parser.emotion)
+                    if not output_text:
+                        continue
                     context.output_texts += output_text
                     # Log if we see "tre" which might indicate "être" was corrupted
                     if 'tre' in output_text.lower() and 'être' not in context.output_texts.lower():
@@ -272,8 +287,23 @@ class HandlerLLM(HandlerBase, ABC):
                     output.set_main_data(output_text)
                     output.add_meta("avatar_text_end", False)
                     output.add_meta("speech_id", speech_id)
+                    output.add_meta("avatar_emotion", tag_parser.emotion)
                     yield output
-            
+
+            remaining_text, emotion_resolved = tag_parser.flush()
+            if emotion_resolved:
+                self._publish_emotion(context, speech_id, tag_parser.emotion)
+            if remaining_text:
+                context.output_texts += remaining_text
+                output = DataBundle(output_definition)
+                output.set_main_data(remaining_text)
+                output.add_meta("avatar_text_end", False)
+                output.add_meta("speech_id", speech_id)
+                output.add_meta("avatar_emotion", tag_parser.emotion)
+                yield output
+
+            context.output_texts = strip_emotion_tags(context.output_texts)
+
             # Post-process the complete response to ensure proper French punctuation and accents
             if context.output_texts:
                 # Fix common French words that might be missing accents
@@ -331,6 +361,7 @@ class HandlerLLM(HandlerBase, ABC):
         end_output.set_main_data('')
         end_output.add_meta("avatar_text_end", True)
         end_output.add_meta("speech_id", speech_id)
+        end_output.add_meta("avatar_emotion", tag_parser.emotion)
         yield end_output
 
     def destroy_context(self, context: HandlerContext):

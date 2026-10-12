@@ -1,6 +1,6 @@
 import time
-from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple
 
 from loguru import logger
 
@@ -9,10 +9,30 @@ from chat_engine.data_models.runtime_data.data_bundle import DataBundleDefinitio
 from chat_engine.data_models.session_info_data import SessionInfoData, IOQueueType
 
 
+MAX_TRACKED_AVATAR_EMOTIONS = 8
+
+
 @dataclass
 class SharedStates:
     active: bool = False
     enable_vad: bool = True
+    # speech_id -> emotion, written by the LLM handler and read by the avatar handler
+    avatar_emotions: Dict[str, str] = field(default_factory=dict)
+
+    def set_avatar_emotion(self, speech_id: str, emotion: str):
+        self.avatar_emotions.pop(speech_id, None)
+        self.avatar_emotions[speech_id] = emotion
+        while len(self.avatar_emotions) > MAX_TRACKED_AVATAR_EMOTIONS:
+            self.avatar_emotions.pop(next(iter(self.avatar_emotions)))
+
+    def get_avatar_emotion(self, speech_id: Optional[str]) -> Optional[str]:
+        if speech_id is None:
+            return None
+        return self.avatar_emotions.get(speech_id)
+
+    def pop_avatar_emotion(self, speech_id: Optional[str]):
+        if speech_id is not None:
+            self.avatar_emotions.pop(speech_id, None)
 
 
 class SessionContext(object):

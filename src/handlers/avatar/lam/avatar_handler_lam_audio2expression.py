@@ -18,12 +18,19 @@ from chat_engine.data_models.chat_engine_config_data import HandlerBaseConfigMod
 from chat_engine.data_models.runtime_data.data_bundle import DataBundleDefinition, DataBundleEntry, DataBundle
 from engine_utils.directory_info import DirectoryInfo
 from engine_utils.general_slicer import SliceContext, slice_data
+from handlers.avatar.emotion.emotion_arkit import (
+    load_arkit_channels, build_channel_index, emotion_to_arkit, blend_emotion, ramp_levels,
+)
+
+ARKIT_FRAME_RATE = 30
 
 
 class AvatarLAMConfig(HandlerBaseConfigModel, BaseModel):
     model_name: str = "LAM_audio2exp"
     feature_extractor_model_name: str = "wav2vec2-base-960h"
     audio_sample_rate: int = Field(default=24000)
+    emotion_weight: float = Field(default=0.6)
+    emotion_ramp_seconds: float = Field(default=0.3)
 
 
 class AvatarLAMContext(HandlerContext):
@@ -33,6 +40,10 @@ class AvatarLAMContext(HandlerContext):
         self.inference_context = None
         self.input_slice_context: Optional[SliceContext] = None
         self.last_speech_id: Optional[str] = None
+        self.shared_states = None
+        self.emotion_speech_id: Optional[str] = None
+        self.emotion_vec: Optional[np.ndarray] = None
+        self.emotion_level: float = 0.0
 
 
 class HandlerAvatarLAM(HandlerBase):
@@ -40,6 +51,7 @@ class HandlerAvatarLAM(HandlerBase):
         super().__init__()
         self.infer = None
         self.arkit_channels: List[str] = []
+        self.channel_index: Dict[str, int] = {}
 
     def get_handler_info(self) -> HandlerBaseInfo:
         return HandlerBaseInfo(
@@ -85,8 +97,8 @@ class HandlerAvatarLAM(HandlerBase):
         self.infer.model.eval()
         arkit_channel_list_path = os.path.join(self.handler_root, "assets", "arkit_face_channels.txt")
         self.arkit_channels.clear()
-        for line in open(arkit_channel_list_path, "r"):
-            self.arkit_channels.append(line.strip())
+        self.arkit_channels.extend(load_arkit_channels(arkit_channel_list_path))
+        self.channel_index = build_channel_index(self.arkit_channels)
 
         t_start = time.monotonic()
         # warmup the model
@@ -106,6 +118,7 @@ class HandlerAvatarLAM(HandlerBase):
         context = AvatarLAMContext(session_context.session_info.session_id)
 
         context.config = handler_config
+        context.shared_states = session_context.shared_states
         context.input_slice_context = SliceContext.create_numpy_slice_context(
             slice_size=round(handler_config.audio_sample_rate * 1.0),
             slice_axis=0,
@@ -158,6 +171,7 @@ class HandlerAvatarLAM(HandlerBase):
 
         audio = inputs.data.get_main_data()
         logger.info(f"LAM handler received audio: shape={audio.shape if audio is not None else None}, speech_id={speech_id}, speech_end={speech_end}")
+        self._update_emotion(context, speech_id)
         audio_segments = queue.Queue()
         for audio_segment in slice_data(context.input_slice_context, audio.squeeze()):
             audio_segments.put_nowait(audio_segment)
@@ -186,7 +200,8 @@ class HandlerAvatarLAM(HandlerBase):
 
             start_of_stream = speech_id != context.last_speech_id
 
-            output.set_main_data(arkit_data.astype(np.float32))
+            arkit_data = self._apply_emotion(context, arkit_data.astype(np.float32), need_flush)
+            output.set_main_data(arkit_data)
             output.set_data("avatar_audio", audio_segment[np.newaxis, ...])
             output.add_meta("speech_id", speech_id)
             output.add_meta("avatar_speech_end", need_flush)
@@ -202,6 +217,39 @@ class HandlerAvatarLAM(HandlerBase):
             context.last_speech_id = speech_id
             if need_flush:
                 context.last_speech_id = None
+                self._end_emotion(context, speech_id)
+
+    def _update_emotion(self, context: AvatarLAMContext, speech_id: Optional[str]):
+        if speech_id != context.emotion_speech_id:
+            context.emotion_speech_id = speech_id
+            context.emotion_vec = None
+            context.emotion_level = 0.0
+        if context.emotion_vec is not None or context.shared_states is None:
+            return
+        emotion = context.shared_states.get_avatar_emotion(speech_id)
+        if emotion is None:
+            return
+        context.emotion_vec = emotion_to_arkit(emotion, self.channel_index)
+        logger.info(f"LAM applying emotion '{emotion}' to speech_id={speech_id}")
+
+    def _apply_emotion(self, context: AvatarLAMContext, arkit_data: np.ndarray, need_flush: bool) -> np.ndarray:
+        if context.emotion_vec is None or context.config.emotion_weight <= 0.0:
+            return arkit_data
+        frames = arkit_data if arkit_data.ndim == 2 else arkit_data.reshape(1, -1)
+        ramp_frames = context.config.emotion_ramp_seconds * ARKIT_FRAME_RATE
+        levels, context.emotion_level = ramp_levels(context.emotion_level, frames.shape[0], ramp_frames,
+                                                    fade_out=need_flush)
+        blended = blend_emotion(frames, context.emotion_vec, context.config.emotion_weight * levels)
+        return blended.reshape(arkit_data.shape)
+
+    @staticmethod
+    def _end_emotion(context: AvatarLAMContext, speech_id: Optional[str]):
+        # session_id is the shared fallback speech_id, so the next turn may already have written to it
+        if context.shared_states is not None and speech_id != context.session_id:
+            context.shared_states.pop_avatar_emotion(speech_id)
+        context.emotion_speech_id = None
+        context.emotion_vec = None
+        context.emotion_level = 0.0
 
     def destroy_context(self, context: HandlerContext):
         pass
