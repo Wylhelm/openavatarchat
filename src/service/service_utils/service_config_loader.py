@@ -13,14 +13,15 @@ _ENV_VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
 def expand_env_vars(value):
-    """Replaces ${VAR} in config strings with the environment value; unset variables are left as-is."""
+    """Replaces ${VAR} in config strings with the environment value; unset or empty variables are left as-is."""
     if isinstance(value, str):
         def replace(match):
             name = match.group(1)
-            if name not in os.environ:
-                logger.warning(f"Config references environment variable {name}, which is not set")
+            env_value = os.environ.get(name)
+            if not env_value:
+                logger.warning(f"Config references environment variable {name}, which is not set or empty")
                 return match.group(0)
-            return os.environ[name]
+            return env_value
         return _ENV_VAR_RE.sub(replace, value)
     if isinstance(value, dict):
         return {k: expand_env_vars(v) for k, v in value.items()}
