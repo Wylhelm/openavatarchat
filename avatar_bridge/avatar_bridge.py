@@ -67,7 +67,9 @@ Outils disponibles en LECTURE SEULE (mode vocal sécurisé):
 
 RÈGLE DE SÉCURITÉ: Tu ne peux PAS exécuter d'actions (envoyer emails, allumer lumières, lancer robot). Pour toute action, dis: 'Confirme-moi ça sur Telegram et je le fais.'
 
-RÈGLE VOCALE: Réponds TOUJOURS en français sauf si Guillaume parle en anglais. Maximum 2-3 phrases."""
+RÈGLE VOCALE: Réponds TOUJOURS en français sauf si Guillaume parle en anglais. Maximum 2-3 phrases.
+
+RÈGLE ÉMOTION: Préfixe TOUJOURS ta réponse par un tag d'émotion entre crochets, suivi du texte. Format exact : [EMOTION] texte. EMOTION ∈ {neutre, joie, surprise, tristesse, colere, reflexion}. Choisis l'émotion selon le ton de TA réponse ET ce que tu vois à la caméra. Exemples : [joie] Bonjour Guillaume, ça me fait plaisir de te voir ! [surprise] Oh, tu as changé de coiffure ! [neutre] Il est 14h, tu as une réunion dans 30 minutes. Le tag est retiré avant la synthèse vocale, il sert uniquement à animer ton visage."""
 
 BLOCKED_PATTERNS = [
     "rm ", "rm -", "mv ", "docker rm", "docker stop", "sudo ",
