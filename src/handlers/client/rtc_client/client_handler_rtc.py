@@ -139,7 +139,7 @@ class ClientHandlerRtc(ClientHandlerBase):
             output_sample_rate=24000,
             output_frame_size=480,
             fps=30,
-            stream_start_delay=0.5,
+            stream_start_delay=0.1,
         )
         self.rtc_streamer_factory.client_handler_delegate = self.handler_delegate
 

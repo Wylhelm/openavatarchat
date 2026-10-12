@@ -22,6 +22,8 @@ class TTSConfig(HandlerBaseConfigModel, BaseModel):
     voice: str = Field(default="Chandra MacFarland")
     language: str = Field(default="fr")
     sample_rate: int = Field(default=24000)
+    warmup_enabled: bool = Field(default=False)
+    warmup_timeout: float = Field(default=15.0)
 
 
 class TTSContext(HandlerContext):
@@ -79,6 +81,17 @@ class HandlerTTS(HandlerBase, ABC):
         logger.info(f"API URL: {self.api_url}")
         logger.info(f"Voice: {self.voice}")
         logger.info(f"Language: {self.language}")
+        if config.warmup_enabled:
+            started_at = time.monotonic()
+            warmup_audio = self._synthesize(
+                "Bonjour.",
+                timeout=config.warmup_timeout,
+            )
+            elapsed = time.monotonic() - started_at
+            if warmup_audio.shape[-1] > 240:
+                logger.info(f"CoquiLocal warmup completed in {elapsed:.2f}s")
+            else:
+                logger.warning("CoquiLocal warmup did not return usable audio")
 
     def create_context(self, session_context, handler_config=None):
         if not isinstance(handler_config, TTSConfig):
@@ -155,7 +168,7 @@ class HandlerTTS(HandlerBase, ABC):
 
         return result.strip()
 
-    def _synthesize(self, text: str) -> np.ndarray:
+    def _synthesize(self, text: str, timeout: float = 60) -> np.ndarray:
         """Call the Coqui proxy and return float32 audio array shaped (1, samples)."""
         endpoint = f"{self.api_url}/v1/audio/speech"
         payload = {
@@ -167,7 +180,7 @@ class HandlerTTS(HandlerBase, ABC):
             "response_format": "wav",
         }
         try:
-            response = requests.post(endpoint, json=payload, timeout=60)
+            response = requests.post(endpoint, json=payload, timeout=timeout)
             response.raise_for_status()
         except requests.exceptions.ConnectionError as e:
             logger.error(f"CoquiLocal TTS: connection error to {endpoint}: {e}")

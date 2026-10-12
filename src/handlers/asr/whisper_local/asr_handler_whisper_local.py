@@ -1,5 +1,6 @@
 
 import io
+import time
 import wave
 from typing import Dict, Optional, cast
 from loguru import logger
@@ -24,6 +25,8 @@ class ASRConfig(HandlerBaseConfigModel, BaseModel):
     api_url: str = Field(default="http://10.0.0.175:9400")
     language: str = Field(default="fr")
     task: str = Field(default="transcribe")
+    warmup_enabled: bool = Field(default=False)
+    warmup_timeout: float = Field(default=15.0)
 
 
 class ASRContext(HandlerContext):
@@ -85,6 +88,35 @@ class HandlerASR(HandlerBase, ABC):
             self.task = handler_config.task
 
         logger.info(f"WhisperLocal ASR handler ready: api_url='{self.api_url}', language='{self.language}', task='{self.task}'")
+        if isinstance(handler_config, ASRConfig) and handler_config.warmup_enabled:
+            self._warmup(handler_config)
+
+    def _warmup(self, config: ASRConfig):
+        """Run one silent inference so the first user request does not load the model."""
+        audio_int16 = np.zeros(16000, dtype=np.int16)
+        wav_buffer = io.BytesIO()
+        with wave.open(wav_buffer, 'wb') as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(16000)
+            wf.writeframes(audio_int16.tobytes())
+
+        url = (
+            f"{config.api_url}/asr?language={config.language}"
+            f"&task={config.task}&output=txt"
+        )
+        started_at = time.monotonic()
+        try:
+            response = requests.post(
+                url,
+                files={"audio_file": ("warmup.wav", wav_buffer.getvalue(), "audio/wav")},
+                timeout=config.warmup_timeout,
+            )
+            response.raise_for_status()
+            elapsed = time.monotonic() - started_at
+            logger.info(f"WhisperLocal warmup completed in {elapsed:.2f}s")
+        except Exception as e:
+            logger.warning(f"WhisperLocal warmup failed; startup will continue: {e}")
 
     def create_context(self, session_context, handler_config=None):
         if not isinstance(handler_config, ASRConfig):
