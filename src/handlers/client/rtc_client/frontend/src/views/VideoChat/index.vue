@@ -149,6 +149,9 @@ function initChatDataChannel() {
   videoChatState.chatDataChannel.addEventListener('message', (event) => {
     const data = JSON.parse(event.data);
     if (data.type === 'chat') {
+      if (data.role === 'human') {
+        videoChatState.localAvatarRenderer?.startThinking?.();
+      }
       const index = videoChatState.chatRecords.findIndex((item) => {
         return item.id === data.id;
       });

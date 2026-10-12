@@ -8,6 +8,7 @@ from handlers.avatar.emotion.emotion_arkit import (
     emotion_to_arkit, blend_emotion, ramp_levels,
 )
 from handlers.avatar.emotion.emotion_tag import EmotionTagStreamParser, strip_emotion_tags
+from handlers.avatar.emotion.micro_expression import MicroExpressionState, micro_expression_offsets
 
 CHANNELS_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "src", "handlers", "avatar", "lam",
                              "assets", "arkit_face_channels.txt")
@@ -35,6 +36,14 @@ class TestEmotionArkit(unittest.TestCase):
         self.assertEqual(normalize_emotion(" Réflexion "), "reflexion")
         self.assertEqual(normalize_emotion("happy"), "neutre")
         self.assertEqual(normalize_emotion(None), "neutre")
+
+    def test_intensity(self):
+        self.assertEqual(normalize_emotion("joie:0.4"), "joie:0.40")
+        self.assertEqual(normalize_emotion("Amusé:0,6"), "amuse:0.60")
+        self.assertEqual(normalize_emotion("joie:2"), "joie")
+        self.assertEqual(normalize_emotion("joie:abc"), "neutre")
+        full = emotion_to_arkit("joie", self.index)
+        self.assertTrue(np.allclose(emotion_to_arkit("joie:0.5", self.index), full * 0.5))
 
     def test_emotion_to_arkit_damps_mouth(self):
         vec = emotion_to_arkit("joie", self.index)
@@ -74,6 +83,36 @@ class TestEmotionArkit(unittest.TestCase):
         self.assertAlmostEqual(float(levels[-1, 0]), 0.0, places=5)
 
 
+class TestMicroExpression(unittest.TestCase):
+    def setUp(self):
+        self.index = build_channel_index(load_arkit_channels(CHANNELS_PATH))
+
+    def test_offsets_shape_and_state(self):
+        state = MicroExpressionState()
+        frames = np.zeros((30, 52), dtype=np.float32)
+        offsets = micro_expression_offsets(frames, self.index, state, 30)
+        self.assertEqual(offsets.shape, (30, 52))
+        self.assertEqual(state.frame, 30)
+        self.assertTrue(np.all(offsets >= 0.0))
+        self.assertLess(offsets.max(), 0.1)
+
+    def test_emphasis_lifts_brows_on_open_jaw(self):
+        frames = np.zeros((30, 52), dtype=np.float32)
+        quiet = micro_expression_offsets(frames, self.index, MicroExpressionState(), 30)
+        frames[:, self.index["jawOpen"]] = 0.7
+        loud = micro_expression_offsets(frames, self.index, MicroExpressionState(), 30)
+        brow = self.index["browInnerUp"]
+        self.assertGreater(loud[-1, brow], quiet[-1, brow] + 0.1)
+
+    def test_drift_continues_across_segments(self):
+        frames = np.zeros((60, 52), dtype=np.float32)
+        whole = micro_expression_offsets(frames, self.index, MicroExpressionState(), 30)
+        state = MicroExpressionState()
+        split = np.concatenate([micro_expression_offsets(frames[:25], self.index, state, 30),
+                                micro_expression_offsets(frames[25:], self.index, state, 30)])
+        self.assertTrue(np.allclose(whole, split))
+
+
 class TestEmotionTagParser(unittest.TestCase):
     def test_char_by_char_tag(self):
         parser = EmotionTagStreamParser()
@@ -86,6 +125,12 @@ class TestEmotionTagParser(unittest.TestCase):
         text = feed_all(parser, ["  [Colère]", " ", "Non", " merci."])
         self.assertEqual(text, "Non merci.")
         self.assertEqual(parser.emotion, "colere")
+
+    def test_tag_with_intensity(self):
+        parser = EmotionTagStreamParser()
+        text = feed_all(parser, list("[réflexion:0.75] Bonne question."))
+        self.assertEqual(text, "Bonne question.")
+        self.assertEqual(parser.emotion, "reflexion:0.75")
 
     def test_no_tag_passes_through(self):
         parser = EmotionTagStreamParser()

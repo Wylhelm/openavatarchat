@@ -21,6 +21,7 @@ from engine_utils.general_slicer import SliceContext, slice_data
 from handlers.avatar.emotion.emotion_arkit import (
     load_arkit_channels, build_channel_index, emotion_to_arkit, blend_emotion, ramp_levels,
 )
+from handlers.avatar.emotion.micro_expression import MicroExpressionState, micro_expression_offsets
 
 ARKIT_FRAME_RATE = 30
 
@@ -31,6 +32,7 @@ class AvatarLAMConfig(HandlerBaseConfigModel, BaseModel):
     audio_sample_rate: int = Field(default=24000)
     emotion_weight: float = Field(default=0.6)
     emotion_ramp_seconds: float = Field(default=0.3)
+    micro_expression_strength: float = Field(default=1.0)
 
 
 class AvatarLAMContext(HandlerContext):
@@ -44,6 +46,7 @@ class AvatarLAMContext(HandlerContext):
         self.emotion_speech_id: Optional[str] = None
         self.emotion_vec: Optional[np.ndarray] = None
         self.emotion_level: float = 0.0
+        self.micro_state = MicroExpressionState()
 
 
 class HandlerAvatarLAM(HandlerBase):
@@ -224,6 +227,7 @@ class HandlerAvatarLAM(HandlerBase):
             context.emotion_speech_id = speech_id
             context.emotion_vec = None
             context.emotion_level = 0.0
+            context.micro_state = MicroExpressionState()
         if context.emotion_vec is not None or context.shared_states is None:
             return
         emotion = context.shared_states.get_avatar_emotion(speech_id)
@@ -233,13 +237,22 @@ class HandlerAvatarLAM(HandlerBase):
         logger.info(f"LAM applying emotion '{emotion}' to speech_id={speech_id}")
 
     def _apply_emotion(self, context: AvatarLAMContext, arkit_data: np.ndarray, need_flush: bool) -> np.ndarray:
-        if context.emotion_vec is None or context.config.emotion_weight <= 0.0:
+        config = context.config
+        use_emotion = context.emotion_vec is not None and config.emotion_weight > 0.0
+        use_micro = config.micro_expression_strength > 0.0
+        if not use_emotion and not use_micro:
             return arkit_data
         frames = arkit_data if arkit_data.ndim == 2 else arkit_data.reshape(1, -1)
-        ramp_frames = context.config.emotion_ramp_seconds * ARKIT_FRAME_RATE
+        ramp_frames = config.emotion_ramp_seconds * ARKIT_FRAME_RATE
         levels, context.emotion_level = ramp_levels(context.emotion_level, frames.shape[0], ramp_frames,
                                                     fade_out=need_flush)
-        blended = blend_emotion(frames, context.emotion_vec, context.config.emotion_weight * levels)
+        offsets = np.zeros_like(frames)
+        if use_emotion:
+            offsets += config.emotion_weight * context.emotion_vec
+        if use_micro:
+            offsets += config.micro_expression_strength * micro_expression_offsets(
+                frames, self.channel_index, context.micro_state, ARKIT_FRAME_RATE)
+        blended = blend_emotion(frames, offsets, levels)
         return blended.reshape(arkit_data.shape)
 
     @staticmethod
@@ -250,6 +263,7 @@ class HandlerAvatarLAM(HandlerBase):
         context.emotion_speech_id = None
         context.emotion_vec = None
         context.emotion_level = 0.0
+        context.micro_state = MicroExpressionState()
 
     def destroy_context(self, context: HandlerContext):
         pass

@@ -3,9 +3,9 @@ from typing import Optional, Tuple
 
 from handlers.avatar.emotion.emotion_arkit import NEUTRAL_EMOTION, canonical_emotion
 
-MAX_TAG_BUFFER_CHARS = 20
-_LEADING_TAG_RE = re.compile(r"^\s*\[([^\[\]]{1,15})\]\s*")
-_ANY_TAG_RE = re.compile(r"\[([^\[\]]{1,15})\]\s*")
+MAX_TAG_BUFFER_CHARS = 26
+_LEADING_TAG_RE = re.compile(r"^\s*\[([^\[\]]{1,20})\]\s*")
+_ANY_TAG_RE = re.compile(r"\[([^\[\]]{1,20})\]\s*")
 
 
 def strip_emotion_tags(text: str) -> str:

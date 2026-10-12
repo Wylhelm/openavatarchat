@@ -29,7 +29,7 @@ default:
         module: vad/silerovad/vad_handler_silero
         speaking_threshold: 0.3
         start_delay: 2048
-        end_delay: 8000
+        end_delay: 16000
         buffer_look_back: 5000
         speech_padding: 1024
       WhisperLocal:
@@ -37,12 +37,16 @@ default:
         module: asr/whisper_local/asr_handler_whisper_local
         api_url: "http://10.0.0.175:9400"
         language: "fr"
+        warmup_enabled: True
+        warmup_timeout: 15
       CoquiLocal:
         enabled: True
         module: tts/coqui_local/tts_handler_coqui_local
         api_url: "http://10.0.0.175:8200"
         voice: "Chandra MacFarland"
         language: "fr"
+        warmup_enabled: True
+        warmup_timeout: 15
       LLMOpenAICompatible:
         max_tokens: 500
         enabled: True
@@ -56,5 +60,6 @@ default:
         api_key: "${AVATAR_BRIDGE_API_KEY}"
       LAM_Driver:
         module: avatar/lam/avatar_handler_lam_audio2expression
-        emotion_weight: 0.6 # 0 disables facial emotions from the [emotion] tag
+        emotion_weight: 1.5 # 0 disables facial emotions from the [emotion] tag
         emotion_ramp_seconds: 0.3
+        micro_expression_strength: 1.0 # brow lifts on stressed syllables + slow drift while speaking; 0 disables

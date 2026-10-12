@@ -9,6 +9,9 @@ import { WsEventTypes } from '@/interface/eventType'
 // @ts-ignore for lam render
 import * as GaussianSplats3D from 'gaussian-splat-renderer-for-lam'
 
+// Falls back to Idle if no reply audio arrives (LLM error, empty reply)
+const THINKING_TIMEOUT_MS = 30000
+
 interface GaussianOptions {
   container: HTMLDivElement
   assetsPath: string
@@ -28,6 +31,7 @@ export class GaussianAvatar extends EventEmitter {
   private _processor!: Processor
   private _renderer: any
   private _audioMute = false
+  private _thinkingTimer: ReturnType<typeof setTimeout> | null = null
   curState = TYVoiceChatState.Idle
   constructor(options: GaussianOptions) {
     const { container, assetsPath, ws, downloadProgress, loadProgress } =
@@ -139,7 +143,29 @@ export class GaussianAvatar extends EventEmitter {
   getArkitFaceFrame() {
     return this._processor?.getArkitFaceFrame().arkitFace
   }
+  startThinking(): void {
+    if (this.curState === TYVoiceChatState.Responding) {
+      return
+    }
+    this._clearThinkingTimer()
+    this.curState = TYVoiceChatState.Thinking
+    this.emit(EventTypes.StateChanged, this.curState)
+    this._thinkingTimer = setTimeout(() => {
+      this._thinkingTimer = null
+      if (this.curState === TYVoiceChatState.Thinking) {
+        this.curState = TYVoiceChatState.Idle
+        this.emit(EventTypes.StateChanged, this.curState)
+      }
+    }, THINKING_TIMEOUT_MS)
+  }
+  private _clearThinkingTimer() {
+    if (this._thinkingTimer) {
+      clearTimeout(this._thinkingTimer)
+      this._thinkingTimer = null
+    }
+  }
   interrupt(): void {
+    this._clearThinkingTimer()
     this._ws.send('%interrupt%') // 约定的打断标识
     this._processor?.interrupt()
     this.curState = TYVoiceChatState.Idle
@@ -152,6 +178,7 @@ export class GaussianAvatar extends EventEmitter {
     this._processor?.clear()
   }
   exit() {
+    this._clearThinkingTimer()
     this._renderer?.dispose()
     this.curState = TYVoiceChatState.Idle
     this._downloadPercent = 0
@@ -162,6 +189,7 @@ export class GaussianAvatar extends EventEmitter {
   private _bindEventTypes() {
     this.on(PlayerEventTypes.Player_StartSpeaking, (player: Player) => {
       console.log('startSpeach')
+      this._clearThinkingTimer()
       this.curState = TYVoiceChatState.Responding
       this.emit(EventTypes.StateChanged, this.curState)
       this._ws.send(
