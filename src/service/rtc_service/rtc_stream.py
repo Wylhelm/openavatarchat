@@ -1,5 +1,6 @@
 import asyncio
 import json
+import time
 import uuid
 import weakref
 from typing import Optional, Dict
@@ -102,16 +103,23 @@ class RtcStream(AsyncAudioVideoStreamHandler):
                 self.client_session_delegate.clear_data()
                 self.first_audio_emitted = True
 
+            # fastrtc cancels this coroutine after 60s ("Timeout in frame
+            # processing cycle"). LAM plays speech from the motion websocket,
+            # so the WebRTC audio queue stays empty during pauses and that
+            # cancel fires on every quiet minute. Return a silence frame first
+            # so the track stays open.
+            loop_deadline = time.monotonic() + 20
             while not self.quit.is_set():
                 chat_data = await self.client_session_delegate.get_data(EngineChannelType.AUDIO)
-                if chat_data is None or chat_data.data is None:
-                    continue
-                audio_array = chat_data.data.get_main_data()
-                if audio_array is None:
-                    continue
-                sample_num = audio_array.shape[-1]
-                self.emit_counter.add_property("audio_emit", sample_num / self.output_sample_rate)
-                return self.output_sample_rate, audio_array
+                if chat_data is not None and chat_data.data is not None:
+                    audio_array = chat_data.data.get_main_data()
+                    if audio_array is not None:
+                        sample_num = audio_array.shape[-1]
+                        self.emit_counter.add_property("audio_emit", sample_num / self.output_sample_rate)
+                        return self.output_sample_rate, audio_array
+                if time.monotonic() >= loop_deadline:
+                    silence = np.zeros((1, self.output_frame_size), dtype=np.float32)
+                    return self.output_sample_rate, silence
         except Exception as e:
             logger.opt(exception=e).error(f"Error in emit: ")
             raise

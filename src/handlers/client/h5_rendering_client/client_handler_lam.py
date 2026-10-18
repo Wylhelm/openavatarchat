@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os.path
+import time
 from typing import Dict, Optional, cast
 
 import gradio
@@ -43,19 +44,39 @@ class LamClientSessionDelegate(RtcClientSessionDelegate):
             "float32"
         )
         welcome_message_sent = False
+        last_send = time.monotonic()
         while not self.quit.is_set():
             try:
                 chat_data: ChatData = await asyncio.wait_for(self.get_data(EngineChannelType.MOTION_DATA), timeout=0.1)
                 logger.info(f"Got chat data {str(chat_data)}")
             except asyncio.TimeoutError:
+                # Idle pauses send nothing, and a reverse proxy (nginx default
+                # proxy_read_timeout is 60s) then closes the motion socket.
+                # The client treats that close as "avatar gone".
+                if time.monotonic() - last_send >= 20:
+                    if websocket.client_state == WebSocketState.DISCONNECTED:
+                        break
+                    try:
+                        await websocket.send_text('{"header":{"name":"Ping"}}')
+                        last_send = time.monotonic()
+                    except Exception as e:
+                        logger.info(f"Motion websocket keepalive failed: {e}")
+                        break
                 continue
-            if not welcome_message_sent:
-                welcome_message = self.motion_data_serializer.serialize(chat_data.data.definition)
-                await websocket.send_bytes(welcome_message)
-                welcome_message_sent = True
-            if chat_data.type == ChatDataType.AVATAR_MOTION_DATA:
-                msg = self.motion_data_serializer.serialize(chat_data.data)
-                await websocket.send_bytes(msg)
+            if websocket.client_state == WebSocketState.DISCONNECTED:
+                break
+            try:
+                if not welcome_message_sent:
+                    welcome_message = self.motion_data_serializer.serialize(chat_data.data.definition)
+                    await websocket.send_bytes(welcome_message)
+                    welcome_message_sent = True
+                if chat_data.type == ChatDataType.AVATAR_MOTION_DATA:
+                    msg = self.motion_data_serializer.serialize(chat_data.data)
+                    await websocket.send_bytes(msg)
+                last_send = time.monotonic()
+            except Exception as e:
+                logger.info(f"Motion websocket send failed: {e}")
+                break
 
     async def _ws_input_task(self, websocket: WebSocket):
         while not self.quit.is_set() and websocket.client_state != WebSocketState.DISCONNECTED:
@@ -63,10 +84,12 @@ class LamClientSessionDelegate(RtcClientSessionDelegate):
                 raw_msg = await asyncio.wait_for(websocket.receive_text(), timeout=0.1)
             except asyncio.TimeoutError:
                 continue
-            logger.info(f"Received websocket message {raw_msg}")
             try:
                 msg = json.loads(raw_msg)
                 msg_type = msg.get("header", {}).get("name")
+                if msg_type == "Ping":
+                    continue
+                logger.info(f"Received websocket message {raw_msg}")
                 if msg_type == "EndSpeech":
                     signal = ChatSignal(
                         source_type=ChatSignalSourceType.CLIENT,
@@ -111,6 +134,8 @@ class LamClientSessionDelegate(RtcClientSessionDelegate):
 
 class ClientLamConfigModel(ClientRtcConfigModel, BaseModel):
     asset_path: Optional[str] = Field(default=None)
+    # Perspective-camera zoom sent to the frontend. 1 keeps the library framing.
+    avatar_scale: float = Field(default=1.0)
 
 
 class ClientLamContext(ClientRtcContext):
@@ -192,6 +217,7 @@ class ClientHandlerLam(ClientHandlerRtc):
             "avatar_type": 'lam',
             "avatar_ws_route": motion_data_route,
             "avatar_assets_path": f"{asset_route}/{self.asset_name}",
+            "avatar_scale": self.handler_config.avatar_scale,
         }
 
         self.setup_rtc_ui(

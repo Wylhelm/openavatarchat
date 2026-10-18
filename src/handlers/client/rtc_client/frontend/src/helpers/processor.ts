@@ -6,7 +6,7 @@ import {
   PlayerEventTypes,
   ProcessorEventTypes,
 } from '../interface/eventType'
-import { unpack } from '../utils/binaryUtils'
+import { ensureBlob, readBlobBytes, unpack } from '../utils/binaryUtils'
 import { Player } from './player'
 
 export type IPayload = Record<string, string | number | object | Blob>
@@ -166,6 +166,7 @@ export class Processor {
       this._arkit_face_sample_rate
     ) {
       const offsetTime = Date.now() - player._firstStartAbsoluteTime
+      if (offsetTime < 0) return null
       let lastIndex = 0
       let firstSampleStartTime: number
       player.samplesList.forEach((item, index) => {
@@ -187,6 +188,7 @@ export class Processor {
       const offset = Math.floor(
         (subOffsetTime / 1000) * this._arkit_face_sample_rate,
       )
+      if (offset < 0) return null
       const arkitFaceFloat32ArrayArray = new Float32Array(
         arkitFaceArrayBufferArray[lastIndex],
       )
@@ -228,6 +230,7 @@ export class Processor {
       this._tts2face_sample_rate
     ) {
       const offsetTime = Date.now() - player._firstStartAbsoluteTime
+      if (offsetTime < 0) return null
       let lastIndex = 0
       let firstSampleStartTime: number
       player.samplesList.forEach((item, index) => {
@@ -249,6 +252,7 @@ export class Processor {
       const offset = Math.floor(
         (subOffsetTime / 1000) * this._tts2face_sample_rate,
       )
+      if (offset < 0) return null
       const arkitFaceFloat32ArrayArray = new Float32Array(
         tts2faceArrayBufferArray[lastIndex],
       )
@@ -312,7 +316,15 @@ export class Processor {
           lastMotionGroup.segment_num
         ) {
           // 单段不分小片段的情况，不需要mergeBlob，为了兼容后续逻辑，这里直接赋值
-          const blob = lastMotionGroup.motion_data_slices[0]
+          const rawSlice = lastMotionGroup.motion_data_slices[0]
+          const blob = ensureBlob(rawSlice)
+          if (!blob) {
+            this.ee.emit(
+              EventTypes.ErrorReceived,
+              `motion payload is ${Object.prototype.toString.call(rawSlice)}, not binary`,
+            )
+            return
+          }
           // const blob = mergeBlob(
           //   lastMotionGroup.motion_data_slices,
           //   lastMotionGroup.merged_motion_data,
@@ -433,7 +445,7 @@ export class Processor {
       const audioBlobSliceStart = data_offset
       const audioBlobSliceEnd = data_offset + shapeLength
       const audioBlob = bin.slice(audioBlobSliceStart, audioBlobSliceEnd)
-      const audioArrayBuffer = await audioBlob.arrayBuffer()
+      const audioArrayBuffer = await readBlobBytes(audioBlob)
       // 如果前一段还没播放结束，后一段已接收到，那么后一段则不能自动播放
       const prevHasPlayerMotionDataGroup = this._motionDataGroups.find(
         (item) => item.player,
@@ -493,7 +505,7 @@ export class Processor {
         )
         this._arkitFaceShape = shape[1]
         const arkitFaceBlob = bin.slice(data_offset, data_offset + shapeLength)
-        const arkitFaceArrayBuffer = await arkitFaceBlob.arrayBuffer()
+        const arkitFaceArrayBuffer = await readBlobBytes(arkitFaceBlob)
         lastMotionGroup.arkitFaceArrayBufferArray.push(arkitFaceArrayBuffer)
       }
     } else if (
@@ -537,7 +549,7 @@ export class Processor {
         )
         this._tts2FaceShape = shape[1]
         const tts2faceBlob = bin.slice(data_offset, data_offset + shapeLength)
-        const tts2faceArrayBuffer = await tts2faceBlob.arrayBuffer()
+        const tts2faceArrayBuffer = await readBlobBytes(tts2faceBlob)
         lastMotionGroup.tts2faceArrayBufferArray.push(tts2faceArrayBuffer)
       }
     } else if (

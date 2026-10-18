@@ -28,6 +28,72 @@ interface ISamples {
   end_of_batch: boolean
   startTime?: number
 }
+interface IScheduledChunk {
+  source: AudioBufferSourceNode
+  envelope: GainNode
+  end: number
+}
+
+// Speech arrives in one-second slices over the network. Playing a slice the
+// moment it lands leaves no slack, so any late slice cuts the voice mid-word.
+const PREBUFFER_SECONDS = 0.4
+const REBUFFER_SECONDS = 0.25
+const FADE_SECONDS = 0.006
+
+const sharedContexts = new Map<number, AudioContext>()
+const sharedOutputs = new WeakMap<AudioContext, AudioNode>()
+let outputBoost = 1
+
+// Out of the phone-call audio path the voice plays at media level, which is
+// quieter. Boost it, with a limiter in front so peaks don't clip.
+export function setPlayerOutputBoost(gain: number) {
+  outputBoost = gain
+}
+
+function getOutput(ctx: AudioContext) {
+  const existing = sharedOutputs.get(ctx)
+  if (existing) return existing
+  let output: AudioNode = ctx.destination
+  if (outputBoost !== 1) {
+    const limiter = ctx.createDynamicsCompressor()
+    limiter.threshold.value = -20
+    limiter.knee.value = 6
+    limiter.ratio.value = 6
+    limiter.attack.value = 0.003
+    limiter.release.value = 0.2
+    const makeup = ctx.createGain()
+    makeup.gain.value = outputBoost
+    limiter.connect(makeup)
+    makeup.connect(ctx.destination)
+    output = limiter
+  }
+  sharedOutputs.set(ctx, output)
+  return output
+}
+
+function getAudioContext(sampleRate: number) {
+  const existing = sharedContexts.get(sampleRate)
+  if (existing && existing.state !== 'closed') return existing
+  const AudioContextCtor =
+    window.AudioContext ||
+    (window as unknown as { webkitAudioContext: typeof AudioContext })
+      .webkitAudioContext
+  // The avatar renderer keeps a phone busy; the default interactive latency
+  // leaves the audio device so little slack that it crackles under that load.
+  let ctx: AudioContext
+  try {
+    ctx = new AudioContextCtor({ sampleRate, latencyHint: 'playback' })
+  } catch {
+    try {
+      ctx = new AudioContextCtor({ latencyHint: 'playback' })
+    } catch {
+      ctx = new AudioContextCtor()
+    }
+  }
+  sharedContexts.set(sampleRate, ctx)
+  return ctx
+}
+
 export class Player {
   static isTypedArray(
     data: Int8Array | Int16Array | Int32Array | Float32Array,
@@ -68,6 +134,11 @@ export class Player {
 
   _firstStartRelativeTime?: number
   _firstStartAbsoluteTime?: number
+  private cursor?: number
+  private timeBase?: number
+  private lastChunk?: IScheduledChunk
+  private scheduled = new Set<AudioBufferSourceNode>()
+  private destroyed = false
 
   constructor(option: IOption, ee: EventEmitter) {
     this.ee = ee
@@ -78,9 +149,19 @@ export class Player {
     await this.audioCtx!.resume()
   }
   destroy() {
+    this.destroyed = true
     this.samplesList = []
-    this.audioCtx?.close()
-    this.audioCtx = undefined
+    this.scheduled.forEach((source) => {
+      source.onended = null
+      try {
+        source.stop()
+      } catch {
+        // already stopped
+      }
+    })
+    this.scheduled.clear()
+    this.lastChunk = undefined
+    this.gainNode?.disconnect()
   }
   feed(audioOptions: {
     audio: Int8Array | Int16Array | Int32Array | Float32Array
@@ -94,13 +175,8 @@ export class Player {
     this._isSupported(audio)
     // 获取格式化后的buffer
     audio = this._getFormattedValue(audio)
-    // 开始拷贝buffer数据
-    // 新建一个Float32Array的空间
     const data = new Float32Array(audio.length)
-    // 复制传入的新数据
-    // 从历史buff位置开始
     data.set(audio, 0)
-    // 将新的完整buff数据赋值给samples
     const samples = {
       data,
       end_of_batch,
@@ -109,61 +185,88 @@ export class Player {
     this.flush(samples, this.samplesList.length - 1)
   }
   flush(samples: ISamples, index: number) {
-    if (!(samples && this.autoPlay && this.audioCtx)) return
-    const { data, end_of_batch } = samples
-    if (this.bufferSource) {
-      this.bufferSource.onended = () => {}
+    if (!(samples && this.autoPlay && this.audioCtx) || this.destroyed) return
+    const ctx = this.audioCtx
+    void ctx.resume()
+    const mono = this.mono(samples.data)
+    const now = ctx.currentTime
+    const first = this.timeBase === undefined
+    const late = this.cursor === undefined || this.cursor < now + 0.02
+    const startAt = late
+      ? now + (first ? PREBUFFER_SECONDS : REBUFFER_SECONDS)
+      : this.cursor!
+
+    if (first) {
+      this.timeBase = startAt
+      this._firstStartAbsoluteTime = Date.now() + (startAt - now) * 1000
+      this._firstStartRelativeTime = 0
     }
-    this.bufferSource = this.audioCtx!.createBufferSource()
-    if (typeof this.option.onended === 'function') {
-      this.bufferSource.onended = () => {
-        if (!end_of_batch && index === this.samplesList.length - 1) {
-          this.ee.emit(PlayerEventTypes.Player_WaitNextAudioClip)
-        }
-        this.option.onended()
+    // The mouth looks up its frame from this offset, so it must match the
+    // moment the slice is actually heard, gaps included.
+    samples.startTime = startAt - this.timeBase!
+    if (first) this.ee.emit(PlayerEventTypes.Player_StartSpeaking, this)
+
+    if (!mono.length) {
+      if (samples.end_of_batch) this.finishAt(Math.max(startAt, this.cursor ?? now))
+      return
+    }
+    const buffer = ctx.createBuffer(1, mono.length, this.option.sampleRate)
+    buffer.getChannelData(0).set(mono)
+    const source = ctx.createBufferSource()
+    source.buffer = buffer
+    const envelope = ctx.createGain()
+    source.connect(envelope)
+    envelope.connect(this.gainNode!)
+    const end = startAt + buffer.duration
+    const fade = Math.min(FADE_SECONDS, buffer.duration / 4)
+
+    if (late) {
+      envelope.gain.setValueAtTime(0, startAt)
+      envelope.gain.linearRampToValueAtTime(1, startAt + fade)
+    } else {
+      envelope.gain.setValueAtTime(1, startAt)
+      this.keepPreviousOpen()
+    }
+    // Fade out unless the next slice shows up in time to cancel it, so a late
+    // slice leaves a soft pause instead of a click.
+    envelope.gain.setValueAtTime(1, end - fade)
+    envelope.gain.linearRampToValueAtTime(0, end)
+
+    source.start(startAt)
+    this.scheduled.add(source)
+    this.lastChunk = { source, envelope, end }
+    this.cursor = end
+    source.onended = () => {
+      this.scheduled.delete(source)
+      envelope.disconnect()
+      if (this.destroyed) return
+      if (!samples.end_of_batch && index === this.samplesList.length - 1) {
+        this.ee.emit(PlayerEventTypes.Player_WaitNextAudioClip)
       }
+      if (samples.end_of_batch) this.option.onended()
     }
+  }
+  private keepPreviousOpen() {
+    const previous = this.lastChunk
+    if (!previous) return
+    const fade = Math.min(FADE_SECONDS, (previous.source.buffer?.duration ?? 0) / 4)
+    const gain = previous.envelope.gain
+    gain.cancelScheduledValues(previous.end - fade)
+    gain.setValueAtTime(1, previous.end - fade)
+  }
+  private finishAt(time: number) {
+    const ctx = this.audioCtx!
+    const delay = Math.max(0, time - ctx.currentTime) * 1000
+    setTimeout(() => {
+      if (!this.destroyed) this.option.onended()
+    }, delay)
+  }
+  private mono(data: Float32Array) {
+    if (this.option.channels <= 1) return data
     const length = data.length / this.option.channels
-    const audioBuffer = this.audioCtx!.createBuffer(
-      this.option.channels,
-      length,
-      this.option.sampleRate,
-    )
-
-    for (let channel = 0; channel < this.option.channels; channel++) {
-      const audioData = audioBuffer.getChannelData(channel)
-      let offset = channel
-      let decrement = 50
-      for (let i = 0; i < length; i++) {
-        audioData[i] = data[offset]
-        /* fadein */
-        if (i < 50) {
-          audioData[i] = (audioData[i] * i) / 50
-        }
-        /* fadeout */
-        if (i >= length - 51) {
-          audioData[i] = (audioData[i] * decrement--) / 50
-        }
-        offset += this.option.channels
-      }
-    }
-
-    if (this.startTime! < this.audioCtx!.currentTime) {
-      this.startTime = this.audioCtx!.currentTime
-    }
-    this.bufferSource.buffer = audioBuffer
-    this.bufferSource.connect(this.gainNode!)
-    this.bufferSource.connect(this.analyserNode!) // bufferSource连接到analyser
-    this.bufferSource.start(this.startTime)
-    samples.startTime = this.startTime
-    if (this._firstStartAbsoluteTime === undefined) {
-      this._firstStartAbsoluteTime = Date.now()
-    }
-    if (this._firstStartRelativeTime === undefined) {
-      this._firstStartRelativeTime = this.startTime
-      this.ee.emit(PlayerEventTypes.Player_StartSpeaking, this)
-    }
-    this.startTime! += audioBuffer.duration
+    const out = new Float32Array(length)
+    for (let i = 0; i < length; i++) out[i] = data[i * this.option.channels]
+    return out
   }
   init(option: IOption) {
     this.option = Object.assign(this.option, option) // 实例最终配置参数
@@ -172,14 +275,10 @@ export class Player {
     this.initAudioContext()
   }
   initAudioContext() {
-    // 初始化音频上下文的东西
-    // @ts-ignore webkitAudioContext
-    this.audioCtx = new (window.AudioContext || window.webkitAudioContext)()
-    // 控制音量的 GainNode
-    // https://developer.mozilla.org/en-US/docs/Web/API/BaseAudioContext/createGain
+    this.audioCtx = getAudioContext(this.option.sampleRate)
     this.gainNode = this.audioCtx.createGain()
     this.gainNode.gain.value = this.option.isMute ? 0 : 1
-    this.gainNode.connect(this.audioCtx.destination)
+    this.gainNode.connect(getOutput(this.audioCtx))
     this.startTime = this.audioCtx.currentTime
     this.analyserNode = this.audioCtx.createAnalyser()
     this.analyserNode.fftSize = this.option.fftSize

@@ -42,7 +42,9 @@ export async function getStream(
     audio:
       typeof audio === 'object'
         ? { ...audio, ...audio_fallback_constraints }
-        : audio,
+        : audio && typeof audio_fallback_constraints === 'object'
+          ? audio_fallback_constraints
+          : audio,
   }
   console.log(constraints, 'constraints')
   return navigator.mediaDevices

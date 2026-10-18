@@ -3,6 +3,8 @@ import { Processor } from '@/helpers/processor'
 import { type WS } from '@/helpers/ws.js'
 import { EventTypes, PlayerEventTypes } from '@/interface/eventType'
 import { TYVoiceChatState } from '@/interface/voiceChat'
+import { AvatarLife, attachAvatarLife } from '@/utils/avatarLife'
+import { ensureBlob } from '@/utils/binaryUtils'
 import EventEmitter from 'eventemitter3'
 // import * as GaussianSplats3D from "./gaussian-splats-3d.module.js";
 import { WsEventTypes } from '@/interface/eventType'
@@ -12,10 +14,46 @@ import * as GaussianSplats3D from 'gaussian-splat-renderer-for-lam'
 // Falls back to Idle if no reply audio arrives (LLM error, empty reply)
 const THINKING_TIMEOUT_MS = 30000
 
+// A phone renders the splats at a 3x pixel ratio with no frame cap. That
+// saturates its CPU within a couple of turns, and the starved audio thread
+// then crackles. Face data is 30 fps, so rendering faster adds nothing.
+const MOBILE_MAX_PIXEL_RATIO = 1.5
+const MOBILE_FRAME_MS = 1000 / 30
+
+function isMobileDevice() {
+  return window.matchMedia?.('(pointer: coarse)').matches ?? false
+}
+
+function capDevicePixelRatio(max: number) {
+  const native = window.devicePixelRatio || 1
+  if (native <= max) return
+  Object.defineProperty(window, 'devicePixelRatio', {
+    configurable: true,
+    get: () => max,
+  })
+}
+
+function capFrameRate(renderer: any, frameMs: number) {
+  if (!renderer || typeof renderer.render !== 'function' || renderer.__frameCapped) return
+  renderer.__frameCapped = true
+  const renderFrame = renderer.render.bind(renderer)
+  let lastFrame = 0
+  renderer.render = () => {
+    const now = performance.now()
+    if (now - lastFrame < frameMs - 2 && renderer.viewer) {
+      renderer.viewer.requestFrameId = requestAnimationFrame(() => renderer.render())
+      return
+    }
+    lastFrame = now
+    renderFrame()
+  }
+}
+
 interface GaussianOptions {
   container: HTMLDivElement
   assetsPath: string
   ws: WS
+  avatarScale?: number
   downloadProgress?: (percent: number) => void
   loadProgress?: (percent: number) => void
 }
@@ -32,11 +70,16 @@ export class GaussianAvatar extends EventEmitter {
   private _renderer: any
   private _audioMute = false
   private _thinkingTimer: ReturnType<typeof setTimeout> | null = null
+  private _exited = false
+  private _avatarScale = 1
+  private _life = new AvatarLife()
   curState = TYVoiceChatState.Idle
   constructor(options: GaussianOptions) {
-    const { container, assetsPath, ws, downloadProgress, loadProgress } =
-      options
+    const { container, assetsPath, ws, avatarScale, downloadProgress, loadProgress } = options
     super()
+    if (avatarScale && avatarScale > 0) {
+      this._avatarScale = avatarScale
+    }
     this._avatarDivEle = container
     this._assetsPath = assetsPath
     this._ws = ws
@@ -64,9 +107,7 @@ export class GaussianAvatar extends EventEmitter {
   }
   private _init() {
     if (!this._avatarDivEle || !this._assetsPath || !this._ws) {
-      throw new Error(
-        'Lack of necessary initialization parameters for gaussian render',
-      )
+      throw new Error('Lack of necessary initialization parameters for gaussian render')
     }
     this._processor = new Processor(this)
     this._bindEventTypes()
@@ -77,7 +118,12 @@ export class GaussianAvatar extends EventEmitter {
   }
 
   async getData() {
-    this._ws.on(WsEventTypes.WS_MESSAGE, (data: Blob) => {
+    this._ws.on(WsEventTypes.WS_MESSAGE, (data: unknown) => {
+      // Text frames are control messages (server Ping). Motion data is binary.
+      const blob = ensureBlob(data)
+      if (!blob) {
+        return
+      }
       if (this._downloadPercent < 1 || this._loadPercent < 1) {
         // 本地数字人未加载完成前，不处理数据
         return
@@ -89,7 +135,7 @@ export class GaussianAvatar extends EventEmitter {
         avatar_motion_data: {
           first_package: true, // 是否首包
           segment_num: 1, // 分片数量，首包存在该值
-          binary_size: data.size, // 数据大小，首包存在该值
+          binary_size: blob.size, // 数据大小，首包存在该值
           use_binary_frame: false, // 是否使用二进制帧，首包存在该值
         },
       })
@@ -97,7 +143,7 @@ export class GaussianAvatar extends EventEmitter {
       this._processor.add({
         avatar_motion_data: {
           first_package: false,
-          motion_data_slice: data, // 数据分片，非首包存在该值
+          motion_data_slice: blob, // 数据分片，非首包存在该值
           is_audio_mute: this._audioMute, // 音频片段是否静音，非首包存在该值
         },
       })
@@ -105,6 +151,8 @@ export class GaussianAvatar extends EventEmitter {
   }
 
   async render() {
+    const mobile = isMobileDevice()
+    if (mobile) capDevicePixelRatio(MOBILE_MAX_PIXEL_RATIO)
     this._renderer = await GaussianSplats3D.GaussianSplatRenderer.getInstance(
       this._avatarDivEle,
       this._assetsPath,
@@ -112,14 +160,34 @@ export class GaussianAvatar extends EventEmitter {
         getChatState: this.getChatState.bind(this),
         getExpressionData: this.getArkitFaceFrame.bind(this),
         downloadProgress: this._downloadProgress.bind(this),
-        loadProgress: this._loadProgress.bind(this),
+        loadProgress: (percent: number) => {
+          this._loadProgress(percent)
+          if (percent >= 1) this._attachLife()
+        },
         backgroundColor: (() => {
           const theme = document.documentElement.getAttribute('data-theme') || 'dark'
-          const isLight = theme === 'light' || (theme === 'system' && window.matchMedia('(prefers-color-scheme: light)').matches)
+          const isLight =
+            theme === 'light' ||
+            (theme === 'system' && window.matchMedia('(prefers-color-scheme: light)').matches)
           return isLight ? '0xf4f4f8' : '0x0a0a0f'
         })(),
-      },
+      }
     )
+    if (mobile) capFrameRate(this._renderer, MOBILE_FRAME_MS)
+    this._applyAvatarScale()
+    this._attachLife()
+  }
+  private _attachLife() {
+    attachAvatarLife(this._renderer, this._life)
+  }
+  private _applyAvatarScale() {
+    const camera = this._renderer?.viewer?.camera
+    if (!camera || this._avatarScale === 1) {
+      return
+    }
+    camera.zoom = this._avatarScale
+    camera.updateProjectionMatrix?.()
+    this._renderer?.viewer?.forceRenderNextFrame?.()
   }
   setBackgroundColor(hexColor: string) {
     try {
@@ -141,7 +209,10 @@ export class GaussianAvatar extends EventEmitter {
     return this.curState
   }
   getArkitFaceFrame() {
-    return this._processor?.getArkitFaceFrame().arkitFace
+    this._life.tick(this.curState)
+    const speech = this._processor?.getArkitFaceFrame()?.arkitFace
+    if (speech) return speech
+    return this._life.weights
   }
   startThinking(): void {
     if (this.curState === TYVoiceChatState.Responding) {
@@ -178,8 +249,12 @@ export class GaussianAvatar extends EventEmitter {
     this._processor?.clear()
   }
   exit() {
+    if (this._exited) return
+    this._exited = true
     this._clearThinkingTimer()
-    this._renderer?.dispose()
+    const renderer = this._renderer
+    this._renderer = null
+    renderer?.dispose()
     this.curState = TYVoiceChatState.Idle
     this._downloadPercent = 0
     this._loadPercent = 0
@@ -196,26 +271,25 @@ export class GaussianAvatar extends EventEmitter {
         JSON.stringify({
           header: { name: EventTypes.StartSpeech },
           payload: {},
-        }),
+        })
       )
     })
     this.on(PlayerEventTypes.Player_EndSpeaking, (player: Player) => {
       console.log('endSpeach')
       this.curState = TYVoiceChatState.Idle
       this.emit(EventTypes.StateChanged, this.curState)
-      this._ws.send(
-        JSON.stringify({ header: { name: EventTypes.EndSpeech }, payload: {} }),
-      )
+      this._ws.send(JSON.stringify({ header: { name: EventTypes.EndSpeech }, payload: {} }))
     })
     this.on(EventTypes.ErrorReceived, (data) => {
-      console.log('ErrorReceived', data)
+      const message = typeof data === 'string' ? data : String(data)
+      console.log('ErrorReceived', message)
       this.curState = TYVoiceChatState.Idle
       this.emit(EventTypes.StateChanged, this.curState)
       this._ws.send(
         JSON.stringify({
           header: { name: EventTypes.ErrorReceived },
-          payload: { ...data },
-        }),
+          payload: { message },
+        })
       )
     })
     this._ws.on(WsEventTypes.WS_CLOSE, () => {

@@ -5,6 +5,7 @@ from loguru import logger
 from pydantic import BaseModel
 
 from engine_utils.singleton import SingletonMeta
+from service.rtc_service.turn_providers.cloudflare_turn_service import CloudflareTurnProvider
 from service.rtc_service.turn_providers.twilio_service import TwilioTurnProvider
 from service.rtc_service.turn_providers.turn_service import TurnServerProvider
 from service.rtc_service.turn_providers.stun_service import StunServerProvider
@@ -14,6 +15,7 @@ from service.service_data_models.service_config_data import ServiceConfigData
 class RTCProvider(metaclass=SingletonMeta):
     def __init__(self):
         self.rtc_turn_providers = {
+            "cloudflare": CloudflareTurnProvider(),
             "twilio": TwilioTurnProvider(),
             "turn_server": TurnServerProvider(),
             "stun_server": StunServerProvider(),
@@ -30,7 +32,11 @@ class RTCProvider(metaclass=SingletonMeta):
         else:
             rtc_config = None
         if rtc_config is not None:
-            logger.info(f"Parsing RTC config: {rtc_config}")
+            redacted = {
+                key: "***" if key in {"credential", "api_token", "api_key", "secret"} else value
+                for key, value in rtc_config.items()
+            }
+            logger.info(f"Parsing RTC config: {redacted}")
             turn_provider_name = rtc_config.get("turn_provider")
             turn_provider = None
             turn_provider_config = None

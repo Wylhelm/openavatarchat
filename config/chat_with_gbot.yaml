@@ -12,24 +12,31 @@ default:
     model_root: "models"
     concurrent_limit: 5
     turn_config:
-      turn_provider: "turn_server"
-      urls:
-        - "turn:10.0.0.175:3478?transport=udp"
-      username: "avatar"
-      credential: "kqvc6rjn9suai83l02pgbfw7"
+      # Public Cloudflare TURN, so a phone off the LAN can relay audio.
+      turn_provider: "cloudflare"
+      key_id: "${CLOUDFLARE_TURN_KEY_ID}"
+      api_token: "${CLOUDFLARE_TURN_KEY_API_TOKEN}"
+      ttl: 86400
     handler_search_path:
       - "src/handlers"
     handler_configs:
       LamClient:
         module: client/h5_rendering_client/client_handler_lam
         asset_path: "lam_samples/gbot.zip"
-        # max time a session will last for
-        connection_ttl: 900
+        # Camera zoom. 1 is the renderer default; higher fills more of the frame.
+        avatar_scale: 1.5
+        # Session lifetime in seconds. 900 closed WebRTC after 15 minutes,
+        # which dropped the avatar until Start was clicked again.
+        connection_ttl: 86400
       SileroVad:
         module: vad/silerovad/vad_handler_silero
         speaking_threshold: 0.3
         start_delay: 2048
-        end_delay: 16000
+        # Silence (samples @ 16 kHz) before the turn is closed.
+        # 9600 ≈ 0.6 s: short enough to answer quickly, long enough for a
+        # natural pause between sentences. 5000 (~0.3 s) cuts mid-thought;
+        # 16000 (1 s) feels slow after you stop.
+        end_delay: 9600
         buffer_look_back: 5000
         speech_padding: 1024
       WhisperLocal:
@@ -62,4 +69,4 @@ default:
         module: avatar/lam/avatar_handler_lam_audio2expression
         emotion_weight: 1.5 # 0 disables facial emotions from the [emotion] tag
         emotion_ramp_seconds: 0.3
-        micro_expression_strength: 1.0 # brow lifts on stressed syllables + slow drift while speaking; 0 disables
+        micro_expression_strength: 2.5 # brow lifts on stressed syllables + slow drift while speaking; 0 disables

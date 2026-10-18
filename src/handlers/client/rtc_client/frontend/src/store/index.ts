@@ -1,6 +1,8 @@
+import { setPlayerOutputBoost } from '@/helpers/player'
+import { noEchoCancel } from '@/utils/audioMode'
 import { WS } from '@/helpers/ws'
-import { WsEventTypes } from '@/interface/eventType'
-import { StreamState } from '@/interface/voiceChat'
+import { EventTypes, WsEventTypes } from '@/interface/eventType'
+import { StreamState, TYVoiceChatState } from '@/interface/voiceChat'
 import { GaussianAvatar } from '@/utils/gaussianAvatar'
 import {
   createSimulatedAudioTrack,
@@ -14,12 +16,28 @@ import { message } from 'ant-design-vue'
 import { defineStore } from 'pinia'
 import { useVisionStore } from './vision'
 
+if (noEchoCancel) setPlayerOutputBoost(2.5)
+
 const track_constraints = {
   video: {
     width: 500,
     height: 500,
   },
-  audio: true,
+  audio: noEchoCancel
+    ? { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
+    : true,
+}
+
+// "disconnected" is a transient ICE state. Closing immediately dropped the
+// avatar during a long call whenever the link blipped.
+const DISCONNECT_GRACE_MS = 20000
+let disconnectGraceTimer: ReturnType<typeof setTimeout> | null = null
+
+function clearDisconnectGrace() {
+  if (disconnectGraceTimer !== null) {
+    clearTimeout(disconnectGraceTimer)
+    disconnectGraceTimer = null
+  }
 }
 
 interface VideoChatState {
@@ -38,6 +56,7 @@ interface VideoChatState {
   avatarType: '' | 'lam'
   avatarWSRoute: string
   avatarAssetsPath: string
+  avatarScale: number
   rtcConfig: RTCConfiguration | undefined
   trackConstraints:
     | {
@@ -81,6 +100,7 @@ export const useVideoChatStore = defineStore('videoChatStore', {
       avatarType: '',
       avatarWSRoute: '',
       avatarAssetsPath: '',
+      avatarScale: 1,
       rtcConfig: undefined,
       trackConstraints: track_constraints,
       gsLoadPercent: 0,
@@ -163,8 +183,10 @@ export const useVideoChatStore = defineStore('videoChatStore', {
             this.avatarType = config.avatar_config.avatar_type
             this.avatarWSRoute = config.avatar_config.avatar_ws_route
             this.avatarAssetsPath = config.avatar_config.avatar_assets_path
+            const scale = Number(config.avatar_config.avatar_scale)
+            this.avatarScale = scale > 0 ? scale : 1
           }
-          if (config.track_constraints) {
+          if (config.track_constraints && !noEchoCancel) {
             this.trackConstraints = config.track_constraints
           }
         })
@@ -297,20 +319,55 @@ export const useVideoChatStore = defineStore('videoChatStore', {
           }
         })
     },
+    armDisconnectGrace() {
+      if (disconnectGraceTimer !== null) return
+      disconnectGraceTimer = setTimeout(() => {
+        disconnectGraceTimer = null
+        if (this.peerConnection?.connectionState === 'disconnected') {
+          console.warn('WebRTC stayed disconnected, closing the avatar session')
+          this.endLiveSession()
+        }
+      }, DISCONNECT_GRACE_MS)
+    },
+    endLiveSession() {
+      clearDisconnectGrace()
+      const pc = this.peerConnection
+      if (!pc && this.streamState === StreamState.closed) {
+        return
+      }
+      this.peerConnection = null
+      this.streamState = StreamState.closed
+      this.chatDataChannel = null
+      this.replying = false
+      if (this.avatarType === 'lam') {
+        this.localAvatarRenderer?.exit()
+        this.localAvatarRenderer = null
+        this.gsLoadPercent = 0
+      }
+      if (pc && pc.connectionState !== 'closed') {
+        stop(pc)
+      }
+    },
     async startWebRTC() {
       const visionState = useVisionStore()
       if (this.streamState === 'closed') {
         this.chatRecords = []
         this.peerConnection = new RTCPeerConnection(this.rtcConfig)
-        this.peerConnection.addEventListener('connectionstatechange', async (event) => {
-          switch (this.peerConnection!.connectionState) {
+        this.peerConnection.addEventListener('connectionstatechange', () => {
+          const pc = this.peerConnection
+          if (!pc) return
+          switch (pc.connectionState) {
             case 'connected':
+              clearDisconnectGrace()
               this.streamState = StreamState.open
               break
             case 'disconnected':
-              this.streamState = StreamState.closed
-              stop(this.peerConnection!)
-              // await access_webcam() //TODO 重置状态
+              console.warn('WebRTC disconnected, waiting to see if it recovers')
+              this.armDisconnectGrace()
+              break
+            case 'failed':
+            case 'closed':
+              this.endLiveSession()
               break
             default:
               break
@@ -346,16 +403,9 @@ export const useVideoChatStore = defineStore('videoChatStore', {
       } else if (this.streamState === 'waiting') {
         // waiting 中不允许操作
       } else {
-        stop(this.peerConnection!)
-        this.streamState = StreamState.closed
+        this.endLiveSession()
         this.chatRecords = []
-        this.chatDataChannel = null
-        this.replying = false
         await this.accessDevice()
-        if (this.avatarType === 'lam') {
-          this.localAvatarRenderer?.exit()
-          this.gsLoadPercent = 0
-        }
       }
     },
     initWebsocket(ws_route: string, webRTCId: string) {
@@ -381,6 +431,7 @@ export const useVideoChatStore = defineStore('videoChatStore', {
       const gaussianAvatar = new GaussianAvatar({
         container: visionState.remoteVideoContainerRef!,
         assetsPath: this.avatarAssetsPath,
+        avatarScale: this.avatarScale,
         ws,
         loadProgress: (progress) => {
           console.log('gs loadProgress', progress)
@@ -390,6 +441,14 @@ export const useVideoChatStore = defineStore('videoChatStore', {
           }
         },
       })
+      if (noEchoCancel) {
+        gaussianAvatar.on(EventTypes.StateChanged, (state: TYVoiceChatState) => {
+          const open = state !== TYVoiceChatState.Responding && !this.micMuted
+          this.stream?.getAudioTracks().forEach((track) => {
+            track.enabled = open
+          })
+        })
+      }
       gaussianAvatar.start()
       return gaussianAvatar
     },

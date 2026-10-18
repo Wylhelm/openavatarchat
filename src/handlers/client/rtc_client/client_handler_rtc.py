@@ -8,6 +8,16 @@ from loguru import logger
 from engine_utils.directory_info import DirectoryInfo
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+
+
+class NoCacheStaticFiles(StaticFiles):
+    async def get_response(self, path: str, scope):
+        response = await super().get_response(path, scope)
+        if getattr(response, "status_code", None) == 200:
+            # The bundle filename is stable. Without this, the browser keeps
+            # an old index.js that treats keepalive text as motion audio.
+            response.headers["Cache-Control"] = "no-cache"
+        return response
 import gradio
 import numpy as np
 from fastapi import FastAPI
@@ -174,16 +184,27 @@ class ClientHandlerRtc(ClientHandlerBase):
         self.handler_config = cast(ClientRtcConfigModel, handler_config)
         self.prepare_rtc_definitions()
 
-    def setup_rtc_ui(self, ui, parent_block, fastapi: FastAPI, avatar_config):
-        turn_entity = RTCProvider().prepare_rtc_configuration(self.handler_config.turn_config)
+    def _current_rtc_configuration(self):
+        try:
+            turn_entity = RTCProvider().prepare_rtc_configuration(self.handler_config.turn_config)
+            if turn_entity is None:
+                turn_entity = RTCProvider().prepare_rtc_configuration(self.engine_config.turn_config)
+        except Exception as exc:
+            logger.error(f"Failed to prepare RTC configuration: {exc}")
+            return None
         if turn_entity is None:
-            turn_entity = RTCProvider().prepare_rtc_configuration(self.engine_config.turn_config)
+            return None
+        return turn_entity.rtc_configuration
+
+    def setup_rtc_ui(self, ui, parent_block, fastapi: FastAPI, avatar_config):
+        rtc_configuration = self._current_rtc_configuration()
 
         webrtc = Stream(
             modality="audio-video",
             mode="send-receive",
             time_limit=self.handler_config.connection_ttl,
-            rtc_configuration=turn_entity.rtc_configuration if turn_entity is not None else None,
+            rtc_configuration=rtc_configuration,
+            server_rtc_configuration=rtc_configuration,
             handler=self.rtc_streamer_factory,
             concurrency_limit=self.handler_config.concurrent_limit,
         )
@@ -191,16 +212,21 @@ class ClientHandlerRtc(ClientHandlerBase):
 
         @fastapi.get('/openavatarchat/initconfig')
         async def init_config():
+            # Cloudflare credentials expire, so each visit gets a fresh pair
+            # and the server peer connection uses the same pair.
+            fresh = self._current_rtc_configuration()
+            if fresh is not None:
+                webrtc.server_rtc_configuration = webrtc.convert_to_aiortc_format(fresh)
             config = {
                 "avatar_config": avatar_config,
-                "rtc_configuration": turn_entity.rtc_configuration if turn_entity is not None else None,
+                "rtc_configuration": fresh,
             }
             return JSONResponse(status_code=200, content=config)
 
         frontend_path = Path(DirectoryInfo.get_src_dir() + '/handlers/client/rtc_client/frontend/dist')
         if frontend_path.exists():
             logger.info(f"Serving frontend from {frontend_path}")
-            fastapi.mount('/ui', StaticFiles(directory=frontend_path), name="static")
+            fastapi.mount('/ui', NoCacheStaticFiles(directory=frontend_path), name="static")
             fastapi.add_route('/', RedirectResponse(url='/ui/index.html'))
         else:
             logger.warning(f"Frontend directory {frontend_path} does not exist")

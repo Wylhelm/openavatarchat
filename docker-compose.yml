@@ -16,6 +16,8 @@ services:
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - AVATAR_BRIDGE_API_KEY=${AVATAR_BRIDGE_API_KEY}
+      - CLOUDFLARE_TURN_KEY_ID=${CLOUDFLARE_TURN_KEY_ID}
+      - CLOUDFLARE_TURN_KEY_API_TOKEN=${CLOUDFLARE_TURN_KEY_API_TOKEN}
     # Use host network for WebRTC audio/video RTP to work
     # Docker bridge NAT breaks RTP media streams
     # network_mode: host  # Ne fonctionne pas sur Windows
@@ -30,6 +32,11 @@ services:
       - ./resource:/root/open-avatar-chat/resource
       - ./ssl_certs:/root/open-avatar-chat/ssl_certs
       - ./config:/root/open-avatar-chat/config
+      - ./.env:/root/open-avatar-chat/.env
+      - ./src/service/rtc_service/rtc_provider.py:/root/open-avatar-chat/src/service/rtc_service/rtc_provider.py
+      - ./src/service/rtc_service/turn_providers/cloudflare_turn_service.py:/root/open-avatar-chat/src/service/rtc_service/turn_providers/cloudflare_turn_service.py
+      - ./src/handlers/client/rtc_client/client_handler_rtc.py:/root/open-avatar-chat/src/handlers/client/rtc_client/client_handler_rtc.py
+      - ./src/handlers/client/rtc_client/frontend/dist:/root/open-avatar-chat/src/handlers/client/rtc_client/frontend/dist
     restart: unless-stopped
     command: ["--config", "config/chat_with_gbot.yaml"]
 
