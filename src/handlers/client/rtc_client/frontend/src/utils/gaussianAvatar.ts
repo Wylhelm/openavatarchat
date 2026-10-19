@@ -153,7 +153,18 @@ export class GaussianAvatar extends EventEmitter {
 
   async getData() {
     this._ws.on(WsEventTypes.WS_MESSAGE, (data: unknown) => {
-      // Text frames are control messages (server Ping). Motion data is binary.
+      if (typeof data === 'string') {
+        try {
+          const msg = JSON.parse(data)
+          if (msg?.header?.name === 'InterruptSpeech') {
+            this.handleBargeIn()
+          }
+        } catch {
+          // ignore non-JSON control text frames
+        }
+        return
+      }
+      // Text frames are control messages (server Ping / InterruptSpeech). Motion data is binary.
       const blob = ensureBlob(data)
       if (!blob) {
         return

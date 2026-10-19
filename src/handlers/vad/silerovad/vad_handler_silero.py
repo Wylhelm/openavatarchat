@@ -25,9 +25,9 @@ class SileroVADConfigModel(HandlerBaseConfigModel, BaseModel):
     buffer_look_back: int = Field(default=1024)
     speech_padding: int = Field(default=512)
     barge_in_enabled: bool = Field(default=False)
-    barge_in_threshold: float = Field(default=0.60)
-    barge_in_start_delay: int = Field(default=3072)
-    barge_in_min_rms: float = Field(default=0.02)
+    barge_in_threshold: float = Field(default=0.40)
+    barge_in_start_delay: int = Field(default=1536)
+    barge_in_min_rms: float = Field(default=0.005)
     prewarm_delay: int = Field(default=8000)
 
 
@@ -81,7 +81,7 @@ class HumanAudioVADContext(HandlerContext):
         if self.config.barge_in_enabled and self._is_avatar_active() and self.speaking_status != SpeakingStatus.START:
             return (
                 max(self.config.speaking_threshold, self.config.barge_in_threshold),
-                max(self.config.start_delay, self.config.barge_in_start_delay),
+                self.config.barge_in_start_delay,
             )
         return self.config.speaking_threshold, self.config.start_delay
 
@@ -92,7 +92,7 @@ class HumanAudioVADContext(HandlerContext):
             self.speaking_status = SpeakingStatus.START
             self.total_speech_samples = self.speech_length
             self.prewarm_sent = False
-            sample_num_to_fetch = self.config.buffer_look_back + required_start_delay
+            sample_num_to_fetch = self.config.buffer_look_back + required_start_delay + self.silence_length
             slice_num_to_fetch = math.ceil(sample_num_to_fetch / self.clip_size)
             audio_clips = []
             for history_entry in self.audio_history[-slice_num_to_fetch:]:
@@ -114,9 +114,12 @@ class HumanAudioVADContext(HandlerContext):
                 logger.info(f"VAD pre_start to start got timestamp {head_sample_id}")
             return output_audio, extra_args
         else:
-            if self.silence_length > 0:
+            # Allow up to 3 frames (~96ms) of consonant/diphthong dip during PRE_START
+            # so natural speech does not immediately abort after the first 32ms frame.
+            if self.silence_length > self.clip_size * 3:
                 logger.info("Back to not started status")
                 self.speaking_status = SpeakingStatus.END
+                self.speech_length = 0
             return None, {}
 
     def _update_status_on_start(self, clip: np.ndarray, timestamp: Optional[int] = None):
@@ -172,7 +175,8 @@ class HumanAudioVADContext(HandlerContext):
             self.silence_length = 0
         else:
             self.silence_length += self.clip_size
-            self.speech_length = 0
+            if self.speaking_status != SpeakingStatus.PRE_START:
+                self.speech_length = 0
         if self.speaking_status == SpeakingStatus.PRE_START:
             return self._update_status_on_pre_start(clip, timestamp)
         elif self.speaking_status == SpeakingStatus.START:

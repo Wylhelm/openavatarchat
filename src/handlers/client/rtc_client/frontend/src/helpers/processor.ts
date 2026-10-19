@@ -90,6 +90,7 @@ export class Processor {
   private _tts2face_sample_rate?: number
   private _tts2face_channel_names?: string[]
   private _maxBatchId?: number
+  private _interruptedBatchName?: string
   private _arkitFaceShape?: number
   private _tts2FaceShape?: number
   constructor(ee: EventEmitter) {
@@ -136,9 +137,13 @@ export class Processor {
   }
 
   interrupt() {
+    this._motionDataGroupHandlerQueue.clear()
     this._motionDataGroups.forEach((group) => {
-      if (group.batch_id !== undefined) {
+      if (group.batch_id != null) {
         this._maxBatchId = group.batch_id
+      }
+      if (group.batch_name) {
+        this._interruptedBatchName = group.batch_name
       }
       group.player?.destroy()
     })
@@ -660,11 +665,21 @@ export class Processor {
     }
     // 处理打断后，如果仍接收到上一个batch的motionData, 那么重新销毁
     if (
+      this._interruptedBatchName &&
+      lastMotionGroup.batch_name &&
+      lastMotionGroup.batch_name === this._interruptedBatchName
+    ) {
+      this._motionDataGroups.pop()
+      return false
+    }
+    if (
       this._maxBatchId !== undefined &&
       lastMotionGroup.batch_id !== undefined &&
-      lastMotionGroup.batch_id <= this._maxBatchId
+      lastMotionGroup.batch_id <= this._maxBatchId &&
+      (!lastMotionGroup.batch_name ||
+        lastMotionGroup.batch_name === this._interruptedBatchName)
     ) {
-      this.clear()
+      this._motionDataGroups.pop()
       batchCheckResult = false
     }
     return batchCheckResult

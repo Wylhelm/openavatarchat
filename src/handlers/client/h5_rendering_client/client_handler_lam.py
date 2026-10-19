@@ -48,11 +48,32 @@ class LamClientSessionDelegate(RtcClientSessionDelegate):
         self.motion_data_serializer = serializer
         welcome_message_sent = False
         last_send = time.monotonic()
+        last_barge_in_seq = getattr(self.shared_states, "barge_in_seq", 0) if self.shared_states is not None else 0
         while not self.quit.is_set() and websocket.client_state != WebSocketState.DISCONNECTED:
+            current_barge_in = getattr(self.shared_states, "barge_in_seq", 0) if self.shared_states is not None else 0
+            if current_barge_in != last_barge_in_seq:
+                last_barge_in_seq = current_barge_in
+                self._speech_end_sent = False
+                self._expected_speech_end_ts = 0.0
+                serializer.reset()
+                q = self.output_queues.get(EngineChannelType.MOTION_DATA)
+                if q is not None:
+                    while not q.empty():
+                        try:
+                            q.get_nowait()
+                        except Exception:
+                            break
+                try:
+                    await websocket.send_text('{"header":{"name":"InterruptSpeech"}}')
+                    last_send = time.monotonic()
+                    logger.info(f"Sent InterruptSpeech on motion websocket (barge_in_seq={current_barge_in})")
+                except Exception as e:
+                    logger.info(f"Failed to send InterruptSpeech: {e}")
+
             try:
                 chat_data: Optional[ChatData] = await asyncio.wait_for(
                     self.get_data(EngineChannelType.MOTION_DATA),
-                    timeout=0.1
+                    timeout=0.04
                 )
             except asyncio.TimeoutError:
                 chat_data = None

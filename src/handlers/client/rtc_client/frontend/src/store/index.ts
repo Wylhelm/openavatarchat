@@ -1,5 +1,5 @@
 import { setPlayerOutputBoost } from '@/helpers/player'
-import { noEchoCancel } from '@/utils/audioMode'
+import { isCoarsePointer, noEchoCancel } from '@/utils/audioMode'
 import { WS } from '@/helpers/ws'
 import { EventTypes, WsEventTypes } from '@/interface/eventType'
 import { StreamState, TYVoiceChatState } from '@/interface/voiceChat'
@@ -16,7 +16,7 @@ import { message } from 'ant-design-vue'
 import { defineStore } from 'pinia'
 import { useVisionStore } from './vision'
 
-if (noEchoCancel) setPlayerOutputBoost(2.5)
+if (noEchoCancel || isCoarsePointer) setPlayerOutputBoost(2.5)
 
 const track_constraints = {
   video: {

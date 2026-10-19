@@ -39,9 +39,9 @@ default:
         buffer_look_back: 5000
         speech_padding: 1024
         barge_in_enabled: True
-        barge_in_threshold: 0.65
-        barge_in_start_delay: 2560
-        barge_in_min_rms: 0.025
+        barge_in_threshold: 0.40
+        barge_in_start_delay: 1536
+        barge_in_min_rms: 0.005
         prewarm_delay: 8000
       WhisperLocal:
         enabled: True
