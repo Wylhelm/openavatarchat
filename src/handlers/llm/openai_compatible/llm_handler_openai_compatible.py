@@ -30,10 +30,23 @@ class LLMConfig(HandlerBaseConfigModel, BaseModel):
     api_key: str = Field(default=os.getenv("DASHSCOPE_API_KEY"))
     api_url: str = Field(default=None)
     enable_video_input: bool = Field(default=False)
-    video_input_on_demand: bool = Field(default=True)
+    video_input_on_demand: bool = Field(default=False)
+    voice_elaboration_enabled: bool = Field(default=True)
     history_length: int = Field(default=20)
     temperature: float = Field(default=0.7)  # Lower temperature = more focused, less creative
-    max_tokens: int = Field(default=150)  # Limit response length
+    max_tokens: int = Field(default=800)  # Allow rich multi-sentence responses when relevant
+
+
+_VOICE_ELABORATION_INSTRUCTION = (
+    "\n\n[CONSIGNE VOCALE PRIORITAIRE — REMPLACE TOUTE LIMITE DE 2-3 PHRASES : "
+    "Ton audio est streamé en temps réel dès la première phrase, donc faire une longue réponse "
+    "NE ralentit PAS ton délai de réponse initial. "
+    "Commence par une première phrase courte et naturelle (5 à 12 mots), puis dès que le sujet s'y prête "
+    "(question ouverte, projet, robotique, résumé, explication, conseil, idée, réflexion ou discussion), "
+    "DÉVELOPPE spontanément une réponse longue, riche, complète et détaillée de 5 à 8 phrases en style parlé fluide "
+    "(sans listes à puces ni markdown). Ne fais une réponse courte (1-2 phrases) QUE pour une simple salutation "
+    "ou confirmation rapide.]"
+)
 
 
 _VISUAL_QUERY_PATTERN = re.compile(
@@ -317,14 +330,14 @@ class HandlerLLM(HandlerBase, ABC):
             return
         
         logger.info(f'LLM input: {chat_text}')
-        video_on_demand = getattr(context.config, 'video_input_on_demand', True)
+        video_on_demand = getattr(context.config, 'video_input_on_demand', False)
         include_image = (
             context.enable_video_input
             and context.current_image is not None
             and (not video_on_demand or should_include_video_frame(chat_text))
         )
         if include_image:
-            logger.info("Visual query detected: attaching webcam frame to LLM request")
+            logger.info("Attaching webcam frame to LLM request")
 
         prefix_messages = (
             context.prewarmed_prefix
@@ -332,18 +345,21 @@ class HandlerLLM(HandlerBase, ABC):
             else self._build_prefix_messages(context)
         )
         context.prewarmed_prefix = None
+        outbound_text = filter_text(chat_text)
+        if getattr(context.config, 'voice_elaboration_enabled', True):
+            outbound_text = f"{outbound_text}{_VOICE_ELABORATION_INSTRUCTION}"
         if include_image and context.current_image is not None:
             user_message = {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": filter_text(chat_text)},
+                    {"type": "text", "text": outbound_text},
                     {"type": "image_url", "image_url": {"url": ImageUtils.format_image(context.current_image)}},
                 ],
             }
         else:
             user_message = {
                 "role": "user",
-                "content": filter_text(chat_text),
+                "content": outbound_text,
             }
         request_messages = prefix_messages + [user_message]
 
@@ -355,10 +371,11 @@ class HandlerLLM(HandlerBase, ABC):
             gen_id = getattr(context.shared_states, "turn_generation_id", None)
 
         aborted = False
+        emitted_any_text = False
         try:
             # Get temperature and max_tokens from config if available
             temperature = getattr(context.config, 'temperature', 0.7)
-            max_tokens = getattr(context.config, 'max_tokens', 200)
+            max_tokens = getattr(context.config, 'max_tokens', 800)
             t_llm_start = time.monotonic()
             context.last_conn_warm_ts = t_llm_start
             completion = context.client.chat.completions.create(
@@ -420,6 +437,7 @@ class HandlerLLM(HandlerBase, ABC):
                     output.add_meta("avatar_text_end", False)
                     output.add_meta("speech_id", speech_id)
                     output.add_meta("avatar_emotion", tag_parser.emotion)
+                    emitted_any_text = True
                     yield output
 
             if not aborted:
@@ -433,6 +451,7 @@ class HandlerLLM(HandlerBase, ABC):
                     output.add_meta("avatar_text_end", False)
                     output.add_meta("speech_id", speech_id)
                     output.add_meta("avatar_emotion", tag_parser.emotion)
+                    emitted_any_text = True
                     yield output
 
             context.output_texts = strip_emotion_tags(context.output_texts)
@@ -491,11 +510,16 @@ class HandlerLLM(HandlerBase, ABC):
                 output.set_main_data(output_text)
                 output.add_meta("avatar_text_end", False)
                 output.add_meta("speech_id", speech_id)
+                emitted_any_text = True
                 yield output
         context.input_texts = ''
         context.output_texts = ''
         if aborted:
             return
+        if not emitted_any_text and context.shared_states is not None:
+            context.shared_states.pipeline_generating = False
+            context.shared_states.avatar_speaking = False
+            context.shared_states.enable_vad = True
         logger.info('avatar text end')
         end_output = DataBundle(output_definition)
         end_output.set_main_data('')

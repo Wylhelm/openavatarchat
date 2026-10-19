@@ -24,7 +24,7 @@ class SileroVADConfigModel(HandlerBaseConfigModel, BaseModel):
     end_delay: int = Field(default=5000)
     buffer_look_back: int = Field(default=1024)
     speech_padding: int = Field(default=512)
-    barge_in_enabled: bool = Field(default=True)
+    barge_in_enabled: bool = Field(default=False)
     barge_in_threshold: float = Field(default=0.60)
     barge_in_start_delay: int = Field(default=3072)
     barge_in_min_rms: float = Field(default=0.02)
@@ -122,15 +122,12 @@ class HumanAudioVADContext(HandlerContext):
     def _update_status_on_start(self, clip: np.ndarray, timestamp: Optional[int] = None):
         if self.silence_length >= self.config.end_delay:
             self.speaking_status = SpeakingStatus.END
-            # Trim already-confirmed trailing silence clips while keeping 160ms natural tail
-            trailing_silence_to_trim = max(0, self.silence_length - self.clip_size - 2560)
             output_audio = np.concatenate(
                 [clip, np.zeros(self.config.speech_padding, dtype=clip.dtype)], axis=0)
             logger.info("End of human speech")
             extra_args = {
                 "human_speech_end": True,
                 "post_padding": self.config.speech_padding,
-                "trim_trailing_samples": trailing_silence_to_trim,
             }
             if timestamp is not None:
                 extra_args["head_sample_id"] = timestamp
@@ -159,7 +156,12 @@ class HumanAudioVADContext(HandlerContext):
         self._append_to_history(clip, timestamp)
         threshold, _ = self._active_start_params()
         is_voice = speech_prob > threshold
-        if is_voice and self.speaking_status != SpeakingStatus.START and self._is_avatar_active():
+        if (
+            self.config.barge_in_enabled
+            and is_voice
+            and self.speaking_status != SpeakingStatus.START
+            and self._is_avatar_active()
+        ):
             rms = float(np.sqrt(np.mean(np.square(clip)))) if clip.size > 0 else 0.0
             if rms < self.config.barge_in_min_rms:
                 is_voice = False
@@ -291,7 +293,7 @@ class HandlerAudioVAD(HandlerBase, ABC):
             timestamp = extra_args.get("head_sample_id", head_sample_id)
             speech_id = f"speech-{context.session_id}-{context.speech_id}"
             if human_speech_start and context.shared_states is not None:
-                if context._is_avatar_active():
+                if context.config.barge_in_enabled and context._is_avatar_active():
                     logger.info(f"Barge-in detected on {speech_id}: interrupting avatar speech/generation")
                     context.shared_states.trigger_barge_in(new_speech_id=speech_id)
                     extra_args["barge_in"] = True

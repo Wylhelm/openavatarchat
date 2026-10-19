@@ -186,6 +186,7 @@ class GatewayManager:
         self.pending_run_id: dict[str, str] = {}
         self.pending_resolved: dict[str, bool] = {}
         self.pending_queues: dict[str, asyncio.Queue] = {}
+        self.cancelled_run_ids: set[str] = set()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._lock = asyncio.Lock()
 
@@ -271,6 +272,8 @@ class GatewayManager:
         if msg_type == "event":
             ev = event
             run_id = payload.get("runId")
+            if run_id and run_id in self.cancelled_run_ids:
+                return
 
             # Find matching request: prefer exact runId match, else most recent unresolved request
             req_id = None
@@ -315,12 +318,12 @@ class GatewayManager:
                 self._resolve(req_id, text or self.pending_text.get(req_id, ""))
                 return
 
-            # Agent lifecycle end → short delay then resolve
+            # Agent lifecycle end → short delay then resolve using latest pending_text
             if ev == "agent" and payload.get("stream") == "lifecycle" and payload.get("data", {}).get("phase") == "end":
                 if not self.pending_resolved.get(req_id):
                     self.pending_resolved[req_id] = True
                     asyncio.get_event_loop().call_later(
-                        0.5, self._resolve, req_id, self.pending_text.get(req_id, "")
+                        0.5, self._resolve_if_pending, req_id
                     )
                 return
 
@@ -351,7 +354,12 @@ class GatewayManager:
             # Tool call start → reset accumulated text (intermediate thinking)
             if ev == "agent" and payload.get("stream") == "tool" and payload.get("data", {}).get("phase") == "start":
                 self.pending_text[req_id] = ""
+                self.pending_resolved.pop(req_id, None)
                 return
+
+    def _resolve_if_pending(self, req_id: str):
+        if req_id in self.pending:
+            self._resolve(req_id, self.pending_text.get(req_id, ""))
 
     def _resolve(self, req_id: str, text: str):
         prev_text = self.pending_text.get(req_id, "")
@@ -373,7 +381,9 @@ class GatewayManager:
     async def cancel_request(self, req_id: str):
         fut = self.pending.pop(req_id, None)
         self.pending_text.pop(req_id, None)
-        self.pending_run_id.pop(req_id, None)
+        old_run_id = self.pending_run_id.pop(req_id, None)
+        if old_run_id:
+            self.cancelled_run_ids.add(old_run_id)
         self.pending_resolved.pop(req_id, None)
         q = self.pending_queues.pop(req_id, None)
         if q is not None:

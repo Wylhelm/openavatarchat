@@ -41,6 +41,15 @@ class EmotionTagStreamParser:
             return "", False
         if not stripped.startswith("["):
             return self._resolve(NEUTRAL_EMOTION, self._buffer), True
+        # If a tool call restarted generation mid-tag (e.g. "[sur[sceptique]"),
+        # discard the unclosed prefix before the latest "[".
+        if "[" in stripped[1:]:
+            first_close = stripped.find("]")
+            second_open = stripped.find("[", 1)
+            if first_close == -1 or second_open < first_close:
+                last_open_before_close = stripped.rfind("[", 0, first_close if first_close != -1 else len(stripped))
+                self._buffer = stripped[last_open_before_close:]
+                stripped = self._buffer
         match = _LEADING_TAG_RE.match(self._buffer)
         if match:
             emotion = canonical_emotion(match.group(1))

@@ -90,11 +90,12 @@ class ASRConfig(HandlerBaseConfigModel, BaseModel):
     warmup_enabled: bool = Field(default=False)
     warmup_timeout: float = Field(default=15.0)
     dump_audio: bool = Field(default=False)
-    streaming_asr_enabled: bool = Field(default=True)
+    streaming_asr_enabled: bool = Field(default=False)
     streaming_chunk_seconds: float = Field(default=6.0)
     streaming_max_chunk_seconds: float = Field(default=8.0)
     low_energy_window_ms: int = Field(default=160)
     low_energy_threshold: float = Field(default=0.035)
+    trailing_silence_pad_seconds: float = Field(default=0.5)
 
 
 class ASRContext(HandlerContext):
@@ -239,7 +240,7 @@ class HandlerASR(HandlerBase, ABC):
     def _submit_streaming_pre_chunk(self, context: ASRContext, sample_rate: int):
         if not context.output_audios:
             return
-        chunk_audio = np.concatenate(context.output_audios)
+        chunk_audio = _normalize_audio_chunk(np.concatenate(context.output_audios))
         context.output_audios.clear()
         context.pending_sample_count = 0
         if chunk_audio.size == 0 or float(np.abs(chunk_audio).max()) < 0.01:
@@ -278,21 +279,10 @@ class HandlerASR(HandlerBase, ABC):
             audio = audio.squeeze()
             if audio.ndim == 0:
                 audio = audio.reshape(1)
-            audio_norm = _normalize_audio_chunk(audio)
-            if input_sample_rate != target_sample_rate and audio_norm.size > 0:
-                try:
-                    import librosa
-                    audio_norm = librosa.resample(
-                        audio_norm,
-                        orig_sr=input_sample_rate,
-                        target_sr=target_sample_rate,
-                    )
-                except Exception as e:
-                    logger.error(f"Error resampling audio: {e}")
-
-            if audio_norm.size > 0:
-                context.output_audios.append(audio_norm)
-                context.pending_sample_count += int(audio_norm.shape[0])
+            context.input_sample_rate = input_sample_rate
+            if audio.size > 0:
+                context.output_audios.append(audio)
+                context.pending_sample_count += int(audio.shape[0])
 
         speech_end = inputs.data.get_meta("human_speech_end", False)
         if not speech_end:
@@ -301,7 +291,7 @@ class HandlerASR(HandlerBase, ABC):
             return
 
         t_asr_start = time.monotonic()
-        remainder_audio = (
+        raw_audio = (
             np.concatenate(context.output_audios)
             if context.output_audios
             else np.array([], dtype=np.float32)
@@ -309,9 +299,18 @@ class HandlerASR(HandlerBase, ABC):
         context.output_audios.clear()
         context.pending_sample_count = 0
 
-        trim_trailing = int(inputs.data.get_meta("trim_trailing_samples", 0) or 0)
-        if trim_trailing > 0 and remainder_audio.size > trim_trailing + 4800:
-            remainder_audio = remainder_audio[:-trim_trailing]
+        input_sr = getattr(context, "input_sample_rate", input_sample_rate) or 16000
+        remainder_audio = _normalize_audio_chunk(raw_audio)
+        if input_sr != target_sample_rate and remainder_audio.size > 0:
+            try:
+                import librosa
+                remainder_audio = librosa.resample(
+                    remainder_audio,
+                    orig_sr=input_sr,
+                    target_sr=target_sample_rate,
+                )
+            except Exception as e:
+                logger.error(f"Error resampling audio: {e}")
 
         if context.audio_dump_file is not None and remainder_audio.size > 0:
             context.audio_dump_file.write(remainder_audio.tobytes())
@@ -393,8 +392,19 @@ class HandlerASR(HandlerBase, ABC):
         language = cfg.language
         task = cfg.task
 
+        # Append a short silent tail in RAM (0ms real-time wait) so Whisper's STFT window
+        # never truncates or misrecognizes the final syllable of the utterance.
+        pad_seconds = float(getattr(cfg, "trailing_silence_pad_seconds", 0.5) or 0.0)
+        if pad_seconds > 0 and audio_normalized.size > 0:
+            pad_samples = int(sample_rate * pad_seconds)
+            audio_for_wav = np.concatenate(
+                [audio_normalized, np.zeros(pad_samples, dtype=np.float32)]
+            )
+        else:
+            audio_for_wav = audio_normalized
+
         # Convert float32 [-1, 1] to int16 PCM for WAV encoding
-        audio_int16 = np.clip(audio_normalized * 32767.0, -32768, 32767).astype(np.int16)
+        audio_int16 = np.clip(audio_for_wav * 32767.0, -32768, 32767).astype(np.int16)
 
         wav_buffer = io.BytesIO()
         with wave.open(wav_buffer, 'wb') as wf:

@@ -33,11 +33,12 @@ default:
         speaking_threshold: 0.3
         start_delay: 2048
         # Silence (samples @ 16 kHz) before the turn is closed.
-        # 7680 ≈ 0.48 s: saves 120ms over 0.6s while keeping natural breath pauses.
-        end_delay: 7680
-        buffer_look_back: 1536
-        speech_padding: 256
-        barge_in_enabled: True
+        # 9600 ≈ 0.6 s: short enough to answer quickly, long enough for a
+        # natural pause between sentences without clipping words.
+        end_delay: 9600
+        buffer_look_back: 5000
+        speech_padding: 1024
+        barge_in_enabled: False
         barge_in_threshold: 0.72
         barge_in_start_delay: 3584
         barge_in_min_rms: 0.035
@@ -49,9 +50,10 @@ default:
         language: "fr"
         warmup_enabled: True
         warmup_timeout: 15
-        streaming_asr_enabled: True
+        streaming_asr_enabled: False
         streaming_chunk_seconds: 6.0
         streaming_max_chunk_seconds: 8.0
+        trailing_silence_pad_seconds: 0.5
       CoquiLocal:
         enabled: True
         module: tts/coqui_local/tts_handler_coqui_local
@@ -61,13 +63,14 @@ default:
         warmup_enabled: True
         warmup_timeout: 15
       LLMOpenAICompatible:
-        max_tokens: 500
+        max_tokens: 800
         enabled: True
         module: llm/openai_compatible/llm_handler_openai_compatible
         model_name: "gbot"
         history_length: 12
         enable_video_input: True # ensure your llm (the gbot bridge) supports image_url inputs
-        video_input_on_demand: True # only attach webcam frame when the user asks a visual question
+        video_input_on_demand: False
+        voice_elaboration_enabled: True
         # G-Bot system prompt is managed by the bridge
         system_prompt: ""
         api_url: "http://10.0.0.253:9000/v1"

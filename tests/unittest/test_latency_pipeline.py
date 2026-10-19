@@ -40,6 +40,7 @@ from handlers.asr.whisper_local.asr_handler_whisper_local import (
     _merge_transcript_parts,
     _normalize_audio_chunk,
 )
+from handlers.avatar.emotion.emotion_tag import EmotionTagStreamParser
 from handlers.tts.coqui_local.tts_handler_coqui_local import (
     _decode_wav_bytes,
     extract_tts_segments,
@@ -221,6 +222,40 @@ class TestVADBargeInAndPrewarm(unittest.TestCase):
         # Next clip reaches prewarm_delay (2048 samples)
         _, extra2 = ctx.update_status(0.75, clip_loud, timestamp=2048)
         self.assertTrue(extra2.get("speech_prewarm"))
+
+    def test_barge_in_disabled_uses_normal_threshold(self):
+        ctx = HumanAudioVADContext("sess2")
+        ctx.config = SileroVADConfigModel(
+            speaking_threshold=0.3,
+            start_delay=1024,
+            end_delay=2048,
+            barge_in_enabled=False,
+            barge_in_threshold=0.72,
+            barge_in_start_delay=3584,
+            barge_in_min_rms=0.035,
+        )
+        states = SharedStates()
+        states.avatar_speaking = True
+        ctx.shared_states = states
+
+        clip = np.full(512, 0.01, dtype=np.float32)
+        ctx.update_status(0.40, clip, timestamp=0)
+        self.assertEqual(ctx.speaking_status, SpeakingStatus.PRE_START)
+        audio_out, extra = ctx.update_status(0.40, clip, timestamp=512)
+        self.assertIsNotNone(audio_out)
+        self.assertTrue(extra.get("human_speech_start"))
+
+
+class TestEmotionTagStreamParserRecovery(unittest.TestCase):
+    def test_restarted_tag_after_tool_call(self):
+        parser = EmotionTagStreamParser()
+        out1, res1 = parser.feed("[sur")
+        self.assertEqual(out1, "")
+        self.assertFalse(res1)
+        out2, res2 = parser.feed("[sceptique] Ah, je vois !")
+        self.assertTrue(res2)
+        self.assertEqual(parser.emotion, "sceptique")
+        self.assertEqual(out2, "Ah, je vois !")
 
 
 if __name__ == "__main__":

@@ -33,6 +33,8 @@ class LamClientSessionDelegate(RtcClientSessionDelegate):
         super().__init__()
         self.output_queues[EngineChannelType.MOTION_DATA] = asyncio.Queue()
         self.quit = asyncio.Event()
+        self._expected_speech_end_ts: float = 0.0
+        self._speech_end_sent: bool = False
 
     async def _ws_output_task(self, websocket: WebSocket):
         logger.warning(f"Send task started on {websocket}")
@@ -56,10 +58,22 @@ class LamClientSessionDelegate(RtcClientSessionDelegate):
                 chat_data = None
 
             if chat_data is None:
+                now = time.monotonic()
+                if (
+                    self._speech_end_sent
+                    and self.shared_states is not None
+                    and (not self.shared_states.enable_vad or self.shared_states.avatar_speaking)
+                    and now >= self._expected_speech_end_ts + 1.2
+                ):
+                    logger.info("Watchdog: re-enabling VAD after expected avatar speech completion")
+                    self._speech_end_sent = False
+                    self.shared_states.avatar_speaking = False
+                    self.shared_states.pipeline_generating = False
+                    self.shared_states.enable_vad = True
                 # Idle pauses send nothing, and a reverse proxy (nginx default
                 # proxy_read_timeout is 60s) then closes the motion socket.
                 # The client treats that close as "avatar gone".
-                if time.monotonic() - last_send >= 20:
+                if now - last_send >= 20:
                     if websocket.client_state == WebSocketState.DISCONNECTED:
                         break
                     try:
@@ -86,6 +100,18 @@ class LamClientSessionDelegate(RtcClientSessionDelegate):
                 if chat_data.type == ChatDataType.AVATAR_MOTION_DATA:
                     msg = serializer.serialize(chat_data.data)
                     await websocket.send_bytes(msg)
+                    now = time.monotonic()
+                    arkit = chat_data.data.get_main_data()
+                    clip_dur = (arkit.shape[0] / 30.0) if (arkit is not None and hasattr(arkit, "shape") and len(arkit.shape) > 0) else 0.5
+                    if getattr(chat_data.data, "start_of_stream", False) or now > self._expected_speech_end_ts:
+                        self._expected_speech_end_ts = now + clip_dur + 0.15
+                        self._speech_end_sent = False
+                    else:
+                        self._expected_speech_end_ts += clip_dur
+                    if chat_data.data.get_meta("avatar_speech_end", False) or getattr(chat_data.data, "end_of_stream", False):
+                        self._speech_end_sent = True
+                        if self.shared_states is not None:
+                            self.shared_states.pipeline_generating = False
                     if speech_id and self.shared_states is not None and hasattr(self.shared_states, "mark_ws_first_send"):
                         self.shared_states.mark_ws_first_send(speech_id)
                 last_send = time.monotonic()
@@ -136,12 +162,14 @@ class LamClientSessionDelegate(RtcClientSessionDelegate):
         logger.info(signal)
         if signal.source_type == ChatSignalSourceType.CLIENT and self.shared_states is not None:
             if signal.type == ChatSignalType.END:
+                self._speech_end_sent = False
                 self.shared_states.avatar_speaking = False
                 self.shared_states.pipeline_generating = False
                 self.shared_states.enable_vad = True
             elif signal.type == ChatSignalType.BEGIN:
                 self.shared_states.avatar_speaking = True
             elif signal.type == ChatSignalType.INTERRUPT:
+                self._speech_end_sent = False
                 self.shared_states.trigger_barge_in()
 
     async def serve_websocket(self, websocket: WebSocket):
@@ -156,6 +184,9 @@ class LamClientSessionDelegate(RtcClientSessionDelegate):
         for task in pending:
             task.cancel()
         await asyncio.gather(*pending, return_exceptions=True)
+        if self.shared_states is not None and not getattr(self.shared_states, "pipeline_generating", False):
+            self.shared_states.avatar_speaking = False
+            self.shared_states.enable_vad = True
 
 
 class ClientLamConfigModel(ClientRtcConfigModel, BaseModel):
