@@ -36,6 +36,7 @@ from handlers.asr.whisper_local.asr_handler_whisper_local import (
     ASRConfig,
     ASRContext,
     HandlerASR,
+    _clean_whisper_hallucinations,
     _merge_transcript_parts,
     _normalize_audio_chunk,
 )
@@ -105,6 +106,13 @@ class TestTTSFirstClauseSegmentation(unittest.TestCase):
         self.assertEqual(segments, ["Avec plaisir !"])
         self.assertEqual(rem, "Je lance la recherche maintenant")
 
+    def test_first_clause_skips_4char_interjection_to_cut_on_next_punctuation(self):
+        text = "Ah ! Pi Dog, sur Raspberry Pi. C'est ça. Une base vraiment accessible pour commencer"
+        segments, rem = extract_tts_segments(text, first_chunk_sent=False)
+        self.assertEqual(segments[0], "Ah ! Pi Dog, sur Raspberry Pi.")
+        self.assertEqual(segments[1], "C'est ça.")
+        self.assertEqual(rem, "Une base vraiment accessible pour commencer")
+
     def test_first_clause_splits_on_french_hinge_when_unpunctuated(self):
         text = "Je viens de vérifier l'état du serveur principal mais la base de données"
         segments, rem = extract_tts_segments(text, first_chunk_sent=False)
@@ -163,6 +171,20 @@ class TestStreamingASRHelpers(unittest.TestCase):
         pcm = np.array([0, 16384, -16384], dtype=np.int16)
         norm = _normalize_audio_chunk(pcm)
         self.assertAlmostEqual(float(norm[1]), 0.5, places=4)
+
+    def test_clean_whisper_hallucinations(self):
+        self.assertEqual(
+            _clean_whisper_hallucinations("Sous-titrage Société Radio-Canada", is_short_tail=True),
+            "",
+        )
+        self.assertEqual(
+            _clean_whisper_hallucinations("Merci.", is_short_tail=True),
+            "",
+        )
+        self.assertEqual(
+            _clean_whisper_hallucinations("Merci.", is_short_tail=False),
+            "Merci.",
+        )
 
 
 class TestVADBargeInAndPrewarm(unittest.TestCase):

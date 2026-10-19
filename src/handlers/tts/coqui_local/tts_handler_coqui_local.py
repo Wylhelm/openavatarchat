@@ -42,28 +42,30 @@ def extract_tts_segments(buffer: str, first_chunk_sent: bool) -> Tuple[List[str]
 
     while remaining:
         if is_first:
-            # 1) Look for terminal punctuation (. ! ? 。 ！ ？) with at least 2 words / 8 chars
-            term_match = re.search(r"([.!?。！？]+)\s+", remaining)
-            # 2) Look for clause punctuation (, ; : — …) with at least 3 words / 18 chars
-            clause_match = re.search(r"([,;:—…]+)\s+", remaining)
+            # 1) Look for first terminal punctuation (. ! ? 。 ！ ？) whose prefix is >= 6 chars
+            term_match = None
+            for m in re.finditer(r"([.!?。！？]+)\s+", remaining):
+                if len(remaining[:m.end(1)].strip()) >= 6:
+                    term_match = m
+                    break
+            # 2) Look for first clause punctuation (, ; : — …) whose prefix has >= 3 words and >= 18 chars
+            clause_match = None
+            for m in re.finditer(r"([,;:—…]+)\s+", remaining):
+                cand_clause = remaining[:m.end(1)].strip()
+                if len(cand_clause) >= 18 and len(cand_clause.split()) >= 3:
+                    clause_match = m
+                    break
 
             chosen_end = None
             if term_match and clause_match:
-                cand_clause = remaining[:clause_match.end(1)].strip()
-                if clause_match.start() < term_match.start() and len(cand_clause) >= 18 and len(cand_clause.split()) >= 3:
+                if clause_match.start() < term_match.start():
                     chosen_end = (clause_match.end(1), clause_match.end())
                 else:
-                    cand_term = remaining[:term_match.end(1)].strip()
-                    if len(cand_term) >= 6:
-                        chosen_end = (term_match.end(1), term_match.end())
-            elif term_match:
-                cand_term = remaining[:term_match.end(1)].strip()
-                if len(cand_term) >= 6:
                     chosen_end = (term_match.end(1), term_match.end())
+            elif term_match:
+                chosen_end = (term_match.end(1), term_match.end())
             elif clause_match:
-                cand_clause = remaining[:clause_match.end(1)].strip()
-                if len(cand_clause) >= 18 and len(cand_clause.split()) >= 3:
-                    chosen_end = (clause_match.end(1), clause_match.end())
+                chosen_end = (clause_match.end(1), clause_match.end())
 
             if chosen_end is not None:
                 cut_idx, next_idx = chosen_end
@@ -95,13 +97,16 @@ def extract_tts_segments(buffer: str, first_chunk_sent: bool) -> Tuple[List[str]
             break
         else:
             # Subsequent segments: prefer full sentences (. ! ? ; :), or comma if >= 65 chars
-            sent_match = re.search(r"([.!?;:。！？]+)\s+", remaining)
+            sent_match = None
+            for m in re.finditer(r"([.!?;:。！？]+)\s+", remaining):
+                if len(remaining[:m.end(1)].strip()) >= 6:
+                    sent_match = m
+                    break
             if sent_match:
                 cand = remaining[:sent_match.end(1)].strip()
-                if len(cand) >= 10:
-                    segments.append(cand)
-                    remaining = remaining[sent_match.end():]
-                    continue
+                segments.append(cand)
+                remaining = remaining[sent_match.end():]
+                continue
             if len(remaining) >= 65:
                 comma_match = None
                 for m in re.finditer(r"(,)\s+", remaining):

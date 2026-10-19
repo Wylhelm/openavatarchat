@@ -50,8 +50,8 @@ default:
         warmup_enabled: True
         warmup_timeout: 15
         streaming_asr_enabled: True
-        streaming_chunk_seconds: 2.5
-        streaming_max_chunk_seconds: 3.5
+        streaming_chunk_seconds: 6.0
+        streaming_max_chunk_seconds: 8.0
       CoquiLocal:
         enabled: True
         module: tts/coqui_local/tts_handler_coqui_local

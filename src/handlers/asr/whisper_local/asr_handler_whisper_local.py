@@ -1,6 +1,7 @@
 
 import io
 import os
+import re
 import threading
 import time
 import wave
@@ -21,6 +22,25 @@ from chat_engine.data_models.chat_data_type import ChatDataType
 from chat_engine.data_models.chat_engine_config_data import ChatEngineConfigModel, HandlerBaseConfigModel
 from chat_engine.data_models.runtime_data.data_bundle import DataBundle, DataBundleDefinition, DataBundleEntry
 from engine_utils.directory_info import DirectoryInfo
+
+_WHISPER_HALLUCINATION_PATTERNS = [
+    re.compile(r"\bSous-titrage\s+Soci[ée]t[ée]\s+Radio-Canada\.?", re.IGNORECASE),
+    re.compile(r"\bSous-titres?\s+r[ée]alis[ée]s?\s+par\b[^.!?]*[.!?]?", re.IGNORECASE),
+    re.compile(r"\bMerci\s+d['’]avoir\s+regard[ée]\b[^.!?]*[.!?]?", re.IGNORECASE),
+    re.compile(r"\bAbonnez-vous\b[^.!?]*[.!?]?", re.IGNORECASE),
+]
+
+
+def _clean_whisper_hallucinations(text: str, is_short_tail: bool = False) -> str:
+    if not text:
+        return ""
+    cleaned = text.strip()
+    for pat in _WHISPER_HALLUCINATION_PATTERNS:
+        cleaned = pat.sub("", cleaned).strip()
+    # On a short tail chunk after a pre-chunk, Whisper frequently hallucinates a lone "Merci." on breath noise
+    if is_short_tail and re.fullmatch(r"merci[.!?…]*", cleaned, flags=re.IGNORECASE):
+        return ""
+    return cleaned
 
 
 def _normalize_audio_chunk(audio: np.ndarray) -> np.ndarray:
@@ -71,8 +91,8 @@ class ASRConfig(HandlerBaseConfigModel, BaseModel):
     warmup_timeout: float = Field(default=15.0)
     dump_audio: bool = Field(default=False)
     streaming_asr_enabled: bool = Field(default=True)
-    streaming_chunk_seconds: float = Field(default=2.5)
-    streaming_max_chunk_seconds: float = Field(default=3.5)
+    streaming_chunk_seconds: float = Field(default=6.0)
+    streaming_max_chunk_seconds: float = Field(default=8.0)
     low_energy_window_ms: int = Field(default=160)
     low_energy_threshold: float = Field(default=0.035)
 
@@ -300,7 +320,7 @@ class HandlerASR(HandlerBase, ABC):
         num_pre_chunks = len(context.pre_transcription_futures)
         for fut in context.pre_transcription_futures:
             try:
-                part_text = fut.result(timeout=15.0)
+                part_text = _clean_whisper_hallucinations(fut.result(timeout=15.0), is_short_tail=False)
                 if part_text:
                     pre_texts.append(part_text)
             except Exception as e:
@@ -309,8 +329,8 @@ class HandlerASR(HandlerBase, ABC):
 
         tail_text = ""
         if remainder_audio.size > 0:
-            # If we already have pre-transcribed chunks, allow shorter tail (0.20s); otherwise 0.35s
-            min_duration_seconds = 0.20 if pre_texts else 0.35
+            # If we already have pre-transcribed chunks, require enough speech energy on the tail to avoid breath hallucinations
+            min_duration_seconds = 0.35
             min_samples = int(target_sample_rate * min_duration_seconds)
             if len(remainder_audio) < min_samples:
                 duration = len(remainder_audio) / target_sample_rate
@@ -321,7 +341,10 @@ class HandlerASR(HandlerBase, ABC):
                     )
             else:
                 audio_level = float(np.abs(remainder_audio).max())
-                if audio_level < 0.01:
+                rms_level = float(np.sqrt(np.mean(np.square(remainder_audio))))
+                min_peak = 0.08 if pre_texts else 0.01
+                min_rms = 0.018 if pre_texts else 0.0
+                if audio_level < min_peak or rms_level < min_rms:
                     if not pre_texts:
                         logger.warning(f"Audio too quiet (max level: {audio_level:.4f}), skipping ASR")
                 else:
@@ -330,7 +353,11 @@ class HandlerASR(HandlerBase, ABC):
                         f"Sending {len(remainder_audio)} samples ({duration:.2f}s, level: {audio_level:.4f}, "
                         f"pre_chunks={num_pre_chunks}) to WhisperLocal API"
                     )
-                    tail_text = self._transcribe_via_api(remainder_audio, target_sample_rate, context.config)
+                    raw_tail = self._transcribe_via_api(remainder_audio, target_sample_rate, context.config)
+                    tail_text = _clean_whisper_hallucinations(
+                        raw_tail,
+                        is_short_tail=(bool(pre_texts) and duration < 1.2),
+                    )
 
         all_parts = pre_texts + ([tail_text] if tail_text else [])
         output_text = _merge_transcript_parts(all_parts)
