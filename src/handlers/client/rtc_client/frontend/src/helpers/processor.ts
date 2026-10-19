@@ -413,6 +413,22 @@ export class Processor {
         ) {
           lastMotionGroup.player = prevMotionGroup.player
         } else if (sample_rate) {
+          // Clean up any finished motion groups from earlier batches whose
+          // player already finished playing its audio so the new turn always auto-plays.
+          const now = Date.now()
+          this._motionDataGroups = this._motionDataGroups.filter((item) => {
+            if (item === lastMotionGroup || !item.player) return true
+            const ctx = item.player.audioCtx
+            const ended =
+              ctx &&
+              (item.player as unknown as { cursor?: number }).cursor !== undefined &&
+              (item.player as unknown as { cursor: number }).cursor <= ctx.currentTime + 0.05
+            if (ended) {
+              item.player.destroy()
+              return false
+            }
+            return true
+          })
           lastMotionGroup.player = new Player(
             {
               inputCodec,
@@ -449,14 +465,14 @@ export class Processor {
             this.ee,
           )
         }
-        if (end_of_batch) {
-          const originEnded = lastMotionGroup.player!.option.onended
-          lastMotionGroup.player!.option.onended = () => {
-            originEnded({
-              end_of_batch,
-              lastMotionGroup,
-            })
-          }
+      }
+      if (end_of_batch && lastMotionGroup.player) {
+        const originEnded = lastMotionGroup.player.option.onended
+        lastMotionGroup.player.option.onended = () => {
+          originEnded({
+            end_of_batch,
+            lastMotionGroup,
+          })
         }
       }
       const shapeLength = shape.reduce(
