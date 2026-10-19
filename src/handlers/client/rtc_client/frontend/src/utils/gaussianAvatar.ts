@@ -269,7 +269,6 @@ export class GaussianAvatar extends EventEmitter {
       return
     }
     this._clearThinkingTimer()
-    this._processor?.clear()
     this.curState = TYVoiceChatState.Thinking
     this.emit(EventTypes.StateChanged, this.curState)
     this._thinkingTimer = setTimeout(() => {

@@ -357,6 +357,32 @@ export class Processor {
           if (bin.size !== lastMotionGroup.binSize) {
             this.ee.emit(ProcessorEventTypes.Chat_BinsizeError)
           }
+          // Welcome definition packet (definition_only=True) has batch_id=null and batch_name=null.
+          // Extract channel metadata only; do not create a dummy Player or keep it in _motionDataGroups.
+          if (parsedData.batch_id == null && !parsedData.batch_name) {
+            const arkitDef = parsedData.data_records?.arkit_face
+            if (arkitDef) {
+              if (arkitDef.channel_names && !this._arkit_face_channel_names) {
+                this._arkit_face_channel_names = arkitDef.channel_names
+                this._arkit_face_sample_rate = arkitDef.sample_rate
+              }
+              if (arkitDef.shape && arkitDef.shape.length > 1) {
+                this._arkitFaceShape = arkitDef.shape[1]
+              }
+            }
+            const tts2faceDef = parsedData.data_records?.tts2face
+            if (tts2faceDef) {
+              if (tts2faceDef.channel_names && !this._tts2face_channel_names) {
+                this._tts2face_channel_names = tts2faceDef.channel_names
+                this._tts2face_sample_rate = tts2faceDef.sample_rate
+              }
+              if (tts2faceDef.shape && tts2faceDef.shape.length > 1) {
+                this._tts2FaceShape = tts2faceDef.shape[1]
+              }
+            }
+            this._motionDataGroups.pop()
+            return
+          }
           const batchCheckResult = this._connectBatch(
             parsedData,
             lastMotionGroup,
@@ -413,21 +439,14 @@ export class Processor {
         ) {
           lastMotionGroup.player = prevMotionGroup.player
         } else if (sample_rate) {
-          // Clean up any finished motion groups from earlier batches whose
-          // player already finished playing its audio so the new turn always auto-plays.
-          const now = Date.now()
+          // Clean up any leftover motion groups from earlier batches so the new
+          // turn's Player always starts immediately with autoPlay = true.
           this._motionDataGroups = this._motionDataGroups.filter((item) => {
-            if (item === lastMotionGroup || !item.player) return true
-            const ctx = item.player.audioCtx
-            const ended =
-              ctx &&
-              (item.player as unknown as { cursor?: number }).cursor !== undefined &&
-              (item.player as unknown as { cursor: number }).cursor <= ctx.currentTime + 0.05
-            if (ended) {
-              item.player.destroy()
-              return false
+            if (item === lastMotionGroup || item.batch_id === lastMotionGroup.batch_id) {
+              return true
             }
-            return true
+            item.player?.destroy()
+            return false
           })
           lastMotionGroup.player = new Player(
             {
@@ -624,14 +643,14 @@ export class Processor {
   ) {
     let batchCheckResult = true
     // 处理二进制batch_id
-    if (parsedData.batch_id !== undefined && lastMotionGroup.batch_id === undefined) {
+    if (parsedData.batch_id != null && lastMotionGroup.batch_id === undefined) {
       lastMotionGroup.batch_id = parsedData.batch_id
     }
     // 特殊事件motion如果没有batch_id，也可挂上此batch_id
     if (
       lastMotionGroup.batch_id === undefined &&
       prevMotionGroup &&
-      prevMotionGroup.batch_id !== undefined
+      prevMotionGroup.batch_id != null
     ) {
       lastMotionGroup.batch_id = prevMotionGroup.batch_id
     }
