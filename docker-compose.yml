@@ -34,7 +34,18 @@ services:
       - ./config:/root/open-avatar-chat/config
       - ./.env:/root/open-avatar-chat/.env
       - ./src/service/rtc_service/rtc_provider.py:/root/open-avatar-chat/src/service/rtc_service/rtc_provider.py
+      - ./src/service/rtc_service/rtc_stream.py:/root/open-avatar-chat/src/service/rtc_service/rtc_stream.py
       - ./src/service/rtc_service/turn_providers/cloudflare_turn_service.py:/root/open-avatar-chat/src/service/rtc_service/turn_providers/cloudflare_turn_service.py
+      - ./src/chat_engine/contexts/session_context.py:/root/open-avatar-chat/src/chat_engine/contexts/session_context.py
+      - ./src/chat_engine/core/chat_session.py:/root/open-avatar-chat/src/chat_engine/core/chat_session.py
+      - ./src/handlers/vad/silerovad/vad_handler_silero.py:/root/open-avatar-chat/src/handlers/vad/silerovad/vad_handler_silero.py
+      - ./src/handlers/asr/whisper_local/asr_handler_whisper_local.py:/root/open-avatar-chat/src/handlers/asr/whisper_local/asr_handler_whisper_local.py
+      - ./src/handlers/llm/openai_compatible/llm_handler_openai_compatible.py:/root/open-avatar-chat/src/handlers/llm/openai_compatible/llm_handler_openai_compatible.py
+      - ./src/handlers/tts/coqui_local/tts_handler_coqui_local.py:/root/open-avatar-chat/src/handlers/tts/coqui_local/tts_handler_coqui_local.py
+      - ./src/handlers/avatar/lam/avatar_handler_lam_audio2expression.py:/root/open-avatar-chat/src/handlers/avatar/lam/avatar_handler_lam_audio2expression.py
+      - ./src/engine_utils/media_utils.py:/root/open-avatar-chat/src/engine_utils/media_utils.py
+      - ./src/handlers/avatar/emotion:/root/open-avatar-chat/src/handlers/avatar/emotion
+      - ./src/handlers/client/h5_rendering_client/client_handler_lam.py:/root/open-avatar-chat/src/handlers/client/h5_rendering_client/client_handler_lam.py
       - ./src/handlers/client/rtc_client/client_handler_rtc.py:/root/open-avatar-chat/src/handlers/client/rtc_client/client_handler_rtc.py
       - ./src/handlers/client/rtc_client/frontend/dist:/root/open-avatar-chat/src/handlers/client/rtc_client/frontend/dist
     restart: unless-stopped

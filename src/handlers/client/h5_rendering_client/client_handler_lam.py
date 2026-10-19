@@ -36,20 +36,26 @@ class LamClientSessionDelegate(RtcClientSessionDelegate):
 
     async def _ws_output_task(self, websocket: WebSocket):
         logger.warning(f"Send task started on {websocket}")
-        self.motion_data_serializer = MotionDataSerializer()
-        self.motion_data_serializer.register_audio_data("avatar_audio")
-        self.motion_data_serializer.register_data(
+        serializer = MotionDataSerializer()
+        serializer.register_audio_data("avatar_audio")
+        serializer.register_data(
             "arkit_face",
             "arkit_face",
             "float32"
         )
+        self.motion_data_serializer = serializer
         welcome_message_sent = False
         last_send = time.monotonic()
-        while not self.quit.is_set():
+        while not self.quit.is_set() and websocket.client_state != WebSocketState.DISCONNECTED:
             try:
-                chat_data: ChatData = await asyncio.wait_for(self.get_data(EngineChannelType.MOTION_DATA), timeout=0.1)
-                logger.info(f"Got chat data {str(chat_data)}")
+                chat_data: Optional[ChatData] = await asyncio.wait_for(
+                    self.get_data(EngineChannelType.MOTION_DATA),
+                    timeout=0.1
+                )
             except asyncio.TimeoutError:
+                chat_data = None
+
+            if chat_data is None:
                 # Idle pauses send nothing, and a reverse proxy (nginx default
                 # proxy_read_timeout is 60s) then closes the motion socket.
                 # The client treats that close as "avatar gone".
@@ -63,16 +69,25 @@ class LamClientSessionDelegate(RtcClientSessionDelegate):
                         logger.info(f"Motion websocket keepalive failed: {e}")
                         break
                 continue
+
+            logger.info(f"Got chat data {str(chat_data)}")
             if websocket.client_state == WebSocketState.DISCONNECTED:
                 break
             try:
+                speech_id = chat_data.data.get_meta("speech_id") if chat_data.data is not None else None
+                if self.shared_states is not None and hasattr(self.shared_states, "is_turn_aborted"):
+                    if self.shared_states.is_turn_aborted(speech_id=speech_id):
+                        logger.info(f"Skipping WebSocket send for aborted speech_id={speech_id}")
+                        continue
                 if not welcome_message_sent:
-                    welcome_message = self.motion_data_serializer.serialize(chat_data.data.definition)
+                    welcome_message = serializer.serialize(chat_data.data.definition)
                     await websocket.send_bytes(welcome_message)
                     welcome_message_sent = True
                 if chat_data.type == ChatDataType.AVATAR_MOTION_DATA:
-                    msg = self.motion_data_serializer.serialize(chat_data.data)
+                    msg = serializer.serialize(chat_data.data)
                     await websocket.send_bytes(msg)
+                    if speech_id and self.shared_states is not None and hasattr(self.shared_states, "mark_ws_first_send"):
+                        self.shared_states.mark_ws_first_send(speech_id)
                 last_send = time.monotonic()
             except Exception as e:
                 logger.info(f"Motion websocket send failed: {e}")
@@ -83,6 +98,14 @@ class LamClientSessionDelegate(RtcClientSessionDelegate):
             try:
                 raw_msg = await asyncio.wait_for(websocket.receive_text(), timeout=0.1)
             except asyncio.TimeoutError:
+                continue
+            except Exception as e:
+                logger.info(f"Motion websocket receive ended: {e}")
+                break
+            if raw_msg == "%interrupt%":
+                logger.info("Client sent explicit %interrupt% over motion websocket")
+                if self.shared_states is not None and hasattr(self.shared_states, "trigger_barge_in"):
+                    self.shared_states.trigger_barge_in()
                 continue
             try:
                 msg = json.loads(raw_msg)
@@ -107,29 +130,32 @@ class LamClientSessionDelegate(RtcClientSessionDelegate):
                 continue
 
     def emit_signal(self, signal):
-        # TODO: this is temp implementation a full signal infrastructure is needed.
+        # StartSpeech and EndSpeech from the LAM frontend correspond to
+        # Player_StartSpeaking and Player_EndSpeaking of the AVATAR's audio player.
         super().emit_signal(signal)
         logger.info(signal)
-        if signal.source_type == ChatSignalSourceType.CLIENT:
+        if signal.source_type == ChatSignalSourceType.CLIENT and self.shared_states is not None:
             if signal.type == ChatSignalType.END:
+                self.shared_states.avatar_speaking = False
+                self.shared_states.pipeline_generating = False
                 self.shared_states.enable_vad = True
             elif signal.type == ChatSignalType.BEGIN:
-                # User started speaking - interrupt current avatar speech
-                logger.info("User started speaking - sending interrupt signal")
-                interrupt_signal = ChatSignal(
-                    source_type=ChatSignalSourceType.CLIENT,
-                    type=ChatSignalType.INTERRUPT,
-                )
-                super().emit_signal(interrupt_signal)
+                self.shared_states.avatar_speaking = True
+            elif signal.type == ChatSignalType.INTERRUPT:
+                self.shared_states.trigger_barge_in()
 
     async def serve_websocket(self, websocket: WebSocket):
         logger.warning(f"Ready to serve websocket {websocket}")
         logger.warning(f"send task created")
         receive_task = asyncio.create_task(self._ws_input_task(websocket))
         send_task = asyncio.create_task(self._ws_output_task(websocket))
-        await asyncio.gather(receive_task, send_task)
-        send_task.cancel()
-        receive_task.cancel()
+        done, pending = await asyncio.wait(
+            [receive_task, send_task],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
 
 
 class ClientLamConfigModel(ClientRtcConfigModel, BaseModel):

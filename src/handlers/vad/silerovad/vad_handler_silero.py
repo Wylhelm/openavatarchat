@@ -24,6 +24,11 @@ class SileroVADConfigModel(HandlerBaseConfigModel, BaseModel):
     end_delay: int = Field(default=5000)
     buffer_look_back: int = Field(default=1024)
     speech_padding: int = Field(default=512)
+    barge_in_enabled: bool = Field(default=True)
+    barge_in_threshold: float = Field(default=0.60)
+    barge_in_start_delay: int = Field(default=3072)
+    barge_in_min_rms: float = Field(default=0.02)
+    prewarm_delay: int = Field(default=8000)
 
 
 class SpeakingStatus(enum.Enum):
@@ -45,6 +50,8 @@ class HumanAudioVADContext(HandlerContext):
 
         self.speech_length: int = 0
         self.silence_length: int = 0
+        self.total_speech_samples: int = 0
+        self.prewarm_sent: bool = False
 
         self.shared_states = None
 
@@ -57,13 +64,35 @@ class HumanAudioVADContext(HandlerContext):
         self.audio_history.clear()
         self.speech_length = 0
         self.silence_length = 0
-        self.slice_context.flush()
+        self.total_speech_samples = 0
+        self.prewarm_sent = False
+        if self.slice_context is not None:
+            self.slice_context.flush()
+
+    def _is_avatar_active(self) -> bool:
+        if self.shared_states is None:
+            return False
+        return bool(
+            getattr(self.shared_states, "avatar_speaking", False)
+            or getattr(self.shared_states, "pipeline_generating", False)
+        )
+
+    def _active_start_params(self) -> Tuple[float, int]:
+        if self.config.barge_in_enabled and self._is_avatar_active() and self.speaking_status != SpeakingStatus.START:
+            return (
+                max(self.config.speaking_threshold, self.config.barge_in_threshold),
+                max(self.config.start_delay, self.config.barge_in_start_delay),
+            )
+        return self.config.speaking_threshold, self.config.start_delay
 
     def _update_status_on_pre_start(self, clip: np.ndarray, _timestamp: Optional[int] = None):
-        if self.speech_length >= self.config.start_delay:
+        _, required_start_delay = self._active_start_params()
+        if self.speech_length >= required_start_delay:
             head_sample_id = None
             self.speaking_status = SpeakingStatus.START
-            sample_num_to_fetch = self.config.buffer_look_back + self.config.start_delay
+            self.total_speech_samples = self.speech_length
+            self.prewarm_sent = False
+            sample_num_to_fetch = self.config.buffer_look_back + required_start_delay
             slice_num_to_fetch = math.ceil(sample_num_to_fetch / self.clip_size)
             audio_clips = []
             for history_entry in self.audio_history[-slice_num_to_fetch:]:
@@ -76,7 +105,7 @@ class HumanAudioVADContext(HandlerContext):
                 [np.zeros(self.config.speech_padding, dtype=clip.dtype), output_audio], axis=0)
             self.speech_id += 1
             logger.info("Start of human speech")
-            extra_args =  {
+            extra_args = {
                 "human_speech_start": True,
                 "pre_padding": self.config.speech_padding,
             }
@@ -93,19 +122,26 @@ class HumanAudioVADContext(HandlerContext):
     def _update_status_on_start(self, clip: np.ndarray, timestamp: Optional[int] = None):
         if self.silence_length >= self.config.end_delay:
             self.speaking_status = SpeakingStatus.END
+            # Trim already-confirmed trailing silence clips while keeping 160ms natural tail
+            trailing_silence_to_trim = max(0, self.silence_length - self.clip_size - 2560)
             output_audio = np.concatenate(
                 [clip, np.zeros(self.config.speech_padding, dtype=clip.dtype)], axis=0)
             logger.info("End of human speech")
-            extra_args =  {
+            extra_args = {
                 "human_speech_end": True,
                 "post_padding": self.config.speech_padding,
+                "trim_trailing_samples": trailing_silence_to_trim,
             }
             if timestamp is not None:
                 extra_args["head_sample_id"] = timestamp
                 logger.info(f"VAD start to start got timestamp {timestamp}")
-            return output_audio,  extra_args
+            return output_audio, extra_args
         else:
-            return clip, {"head_sample_id": timestamp}
+            extra_args = {"head_sample_id": timestamp}
+            if not self.prewarm_sent and self.total_speech_samples >= self.config.prewarm_delay:
+                self.prewarm_sent = True
+                extra_args["speech_prewarm"] = True
+            return clip, extra_args
 
     def _update_status_on_end(self, _clip: np.ndarray, _timestamp: Optional[int] = None):
         if self.speech_length > 0:
@@ -119,10 +155,18 @@ class HumanAudioVADContext(HandlerContext):
             self.audio_history.pop(0)
 
     def update_status(self, speech_prob: float, clip: np.ndarray,
-                      timestamp: Optional[int]=None) -> Tuple[Optional[np.ndarray], Dict]:
+                      timestamp: Optional[int] = None) -> Tuple[Optional[np.ndarray], Dict]:
         self._append_to_history(clip, timestamp)
-        if speech_prob > self.config.speaking_threshold:
+        threshold, _ = self._active_start_params()
+        is_voice = speech_prob > threshold
+        if is_voice and self.speaking_status != SpeakingStatus.START and self._is_avatar_active():
+            rms = float(np.sqrt(np.mean(np.square(clip)))) if clip.size > 0 else 0.0
+            if rms < self.config.barge_in_min_rms:
+                is_voice = False
+
+        if is_voice:
             self.speech_length += self.clip_size
+            self.total_speech_samples += self.clip_size
             self.silence_length = 0
         else:
             self.silence_length += self.clip_size
@@ -169,7 +213,8 @@ class HandlerAudioVAD(HandlerBase, ABC):
             slice_size=context.clip_size,
             slice_axis=0,
         )
-        context.history_length_limit = math.ceil((context.config.start_delay + context.config.buffer_look_back)
+        max_start = max(context.config.start_delay, context.config.barge_in_start_delay)
+        context.history_length_limit = math.ceil((max_start + context.config.buffer_look_back)
                                                  / context.clip_size)
         return context
 
@@ -240,13 +285,30 @@ class HandlerAudioVAD(HandlerBase, ABC):
             head_sample_id = context.slice_context.get_last_slice_start_index()
             speech_prob = self._inference(context, clip)
             audio_clip, extra_args = context.update_status(speech_prob, clip, timestamp=head_sample_id)
-            # FIXME this is a hack to disable VAD after human speech end,
-            #  but it should be handled by client or downstream handlers
+            human_speech_start = extra_args.get("human_speech_start", False)
             human_speech_end = extra_args.get("human_speech_end", False)
+            speech_prewarm = extra_args.get("speech_prewarm", False)
             timestamp = extra_args.get("head_sample_id", head_sample_id)
             speech_id = f"speech-{context.session_id}-{context.speech_id}"
+            if human_speech_start and context.shared_states is not None:
+                if context._is_avatar_active():
+                    logger.info(f"Barge-in detected on {speech_id}: interrupting avatar speech/generation")
+                    context.shared_states.trigger_barge_in(new_speech_id=speech_id)
+                    extra_args["barge_in"] = True
+                context.shared_states.human_speaking = True
+                if hasattr(context.shared_states, "mark_speech_start"):
+                    context.shared_states.mark_speech_start(speech_id)
+            if speech_prewarm and context.shared_states is not None:
+                if hasattr(context.shared_states, "mark_speech_prewarm"):
+                    context.shared_states.mark_speech_prewarm(speech_id)
             if human_speech_end:
-                context.shared_states.enable_vad = False
+                if context.shared_states is not None:
+                    context.shared_states.human_speaking = False
+                    if hasattr(context.shared_states, "mark_vad_end"):
+                        vad_tail_ms = (context.config.end_delay / max(1, sample_rate)) * 1000.0
+                        context.shared_states.mark_vad_end(speech_id, vad_end_delay_ms=vad_tail_ms)
+                    if not context.config.barge_in_enabled:
+                        context.shared_states.enable_vad = False
                 context.reset()
             if audio_clip is not None:
                 output = DataBundle(output_definition)

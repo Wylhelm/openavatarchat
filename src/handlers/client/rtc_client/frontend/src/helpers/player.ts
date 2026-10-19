@@ -34,10 +34,10 @@ interface IScheduledChunk {
   end: number
 }
 
-// Speech arrives in one-second slices over the network. Playing a slice the
-// moment it lands leaves no slack, so any late slice cuts the voice mid-word.
-const PREBUFFER_SECONDS = 0.4
-const REBUFFER_SECONDS = 0.25
+// Speech arrives in streaming clauses over the network. A 150ms prebuffer
+// starts playback 250ms faster than 400ms while still absorbing WebSocket jitter.
+const PREBUFFER_SECONDS = 0.15
+const REBUFFER_SECONDS = 0.12
 const FADE_SECONDS = 0.006
 
 const sharedContexts = new Map<number, AudioContext>()

@@ -137,7 +137,7 @@ export class Processor {
 
   interrupt() {
     this._motionDataGroups.forEach((group) => {
-      if (group.batch_id) {
+      if (group.batch_id !== undefined) {
         this._maxBatchId = group.batch_id
       }
       group.player?.destroy()
@@ -184,29 +184,50 @@ export class Processor {
         }
       })
       const samples = player.samplesList[lastIndex]
-      const subOffsetTime = offsetTime - samples.startTime! * 1000
-      const offset = Math.floor(
-        (subOffsetTime / 1000) * this._arkit_face_sample_rate,
-      )
-      if (offset < 0) return null
-      const arkitFaceFloat32ArrayArray = new Float32Array(
-        arkitFaceArrayBufferArray[lastIndex],
-      )
-      const subData = arkitFaceFloat32ArrayArray?.slice(
-        offset * this._arkitFaceShape,
-        offset * this._arkitFaceShape + this._arkitFaceShape,
-      )
-      if (subData?.length) {
-        const result = {}
-        const channelNames = this._arkit_face_channel_names || []
+      if (!samples || samples.startTime === undefined) return null
+      const subOffsetTime = offsetTime - samples.startTime * 1000
+      const exactFrame =
+        (subOffsetTime / 1000) * this._arkit_face_sample_rate
+      if (exactFrame < 0) return null
+      const buffer = arkitFaceArrayBufferArray[lastIndex]
+      if (!buffer) return null
+      const arkitFaceFloat32Array = new Float32Array(buffer)
+      const shape = this._arkitFaceShape
+      const totalFrames = Math.floor(arkitFaceFloat32Array.length / shape)
+      if (totalFrames <= 0) return null
+
+      const frameIdx = Math.floor(exactFrame)
+      const channelNames = this._arkit_face_channel_names || []
+
+      if (frameIdx >= totalFrames) {
+        // Hold and softly decay the final frame of a slice over 180ms while waiting
+        // for the next sentence slice so the face does not snap between sentences.
+        const overrunSeconds =
+          (exactFrame - (totalFrames - 1)) / this._arkit_face_sample_rate
+        if (overrunSeconds > 0.18) return null
+        const decay = Math.exp(-overrunSeconds / 0.08)
+        const lastBase = (totalFrames - 1) * shape
+        const result: Record<string, number> = {}
         channelNames.forEach((channelName, index) => {
-          Object.assign(result, {
-            [channelName]: subData[index],
-          })
+          const val = arkitFaceFloat32Array[lastBase + index] ?? 0
+          const isMouthOrJaw =
+            channelName.startsWith('mouth') || channelName.startsWith('jaw')
+          result[channelName] = isMouthOrJaw ? val * decay : val
         })
         return result
       }
-      return null
+
+      const nextFrameIdx = Math.min(frameIdx + 1, totalFrames - 1)
+      const alpha = exactFrame - frameIdx
+      const baseA = frameIdx * shape
+      const baseB = nextFrameIdx * shape
+      const result: Record<string, number> = {}
+      channelNames.forEach((channelName, index) => {
+        const a = arkitFaceFloat32Array[baseA + index] ?? 0
+        const b = arkitFaceFloat32Array[baseB + index] ?? a
+        result[channelName] = a + (b - a) * alpha
+      })
+      return result
     }
     return null
   }
@@ -587,14 +608,14 @@ export class Processor {
   ) {
     let batchCheckResult = true
     // 处理二进制batch_id
-    if (parsedData.batch_id && lastMotionGroup.batch_id === undefined) {
+    if (parsedData.batch_id !== undefined && lastMotionGroup.batch_id === undefined) {
       lastMotionGroup.batch_id = parsedData.batch_id
     }
     // 特殊事件motion如果没有batch_id，也可挂上此batch_id
     if (
-      !lastMotionGroup.batch_id &&
+      lastMotionGroup.batch_id === undefined &&
       prevMotionGroup &&
-      prevMotionGroup.batch_id
+      prevMotionGroup.batch_id !== undefined
     ) {
       lastMotionGroup.batch_id = prevMotionGroup.batch_id
     }
@@ -604,8 +625,8 @@ export class Processor {
     }
     // 处理打断后，如果仍接收到上一个batch的motionData, 那么重新销毁
     if (
-      this._maxBatchId &&
-      lastMotionGroup.batch_id &&
+      this._maxBatchId !== undefined &&
+      lastMotionGroup.batch_id !== undefined &&
       lastMotionGroup.batch_id <= this._maxBatchId
     ) {
       this.clear()

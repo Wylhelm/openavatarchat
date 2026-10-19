@@ -33,6 +33,7 @@ class AvatarLAMConfig(HandlerBaseConfigModel, BaseModel):
     emotion_weight: float = Field(default=0.6)
     emotion_ramp_seconds: float = Field(default=0.3)
     micro_expression_strength: float = Field(default=1.0)
+    first_slice_min_seconds: float = Field(default=0.20)
 
 
 class AvatarLAMContext(HandlerContext):
@@ -42,6 +43,7 @@ class AvatarLAMContext(HandlerContext):
         self.inference_context = None
         self.input_slice_context: Optional[SliceContext] = None
         self.last_speech_id: Optional[str] = None
+        self.first_motion_emitted: bool = False
         self.shared_states = None
         self.emotion_speech_id: Optional[str] = None
         self.emotion_vec: Optional[np.ndarray] = None
@@ -172,12 +174,35 @@ class HandlerAvatarLAM(HandlerBase):
         speech_end = inputs.data.get_meta("avatar_speech_end", False)
         speech_text = inputs.data.get_meta("avatar_speech_text")
 
+        if context.shared_states is not None and hasattr(context.shared_states, "is_turn_aborted"):
+            if context.shared_states.is_turn_aborted(speech_id=speech_id):
+                context.input_slice_context.flush()
+                context.inference_context = None
+                context.last_speech_id = None
+                context.first_motion_emitted = False
+                return
+
+        if context.last_speech_id is not None and speech_id != context.last_speech_id:
+            context.input_slice_context.flush()
+            context.inference_context = None
+            context.first_motion_emitted = False
+
         audio = inputs.data.get_main_data()
         logger.info(f"LAM handler received audio: shape={audio.shape if audio is not None else None}, speech_id={speech_id}, speech_end={speech_end}")
         self._update_emotion(context, speech_id)
         audio_segments = queue.Queue()
         for audio_segment in slice_data(context.input_slice_context, audio.squeeze()):
             audio_segments.put_nowait(audio_segment)
+        # Flush any buffered tail on the very first TTS clause (>=0.12s) so the avatar
+        # starts speaking the whole first clause immediately without waiting for chunk #2.
+        if not speech_end and not context.first_motion_emitted:
+            rem = context.input_slice_context.last_remainder
+            min_first_samples = round(context.config.audio_sample_rate * context.config.first_slice_min_seconds)
+            if rem is not None and (rem.shape[0] >= min_first_samples or not audio_segments.empty()):
+                if rem.shape[0] >= round(context.config.audio_sample_rate * 0.12):
+                    flushed_first = context.input_slice_context.flush()
+                    if flushed_first is not None:
+                        audio_segments.put_nowait(flushed_first)
         if speech_end:
             end_segment = context.input_slice_context.flush()
             if end_segment is not None:
@@ -185,6 +210,13 @@ class HandlerAvatarLAM(HandlerBase):
         if audio_segments.empty() and speech_end:
             audio_segments.put_nowait(np.zeros([50], dtype=np.float32))
         while not audio_segments.empty():
+            if context.shared_states is not None and hasattr(context.shared_states, "is_turn_aborted"):
+                if context.shared_states.is_turn_aborted(speech_id=speech_id):
+                    context.input_slice_context.flush()
+                    context.inference_context = None
+                    context.last_speech_id = None
+                    context.first_motion_emitted = False
+                    return
             t_start = time.monotonic()
             audio_segment = audio_segments.get_nowait()
             result, context_update = self.infer.infer_streaming_audio(
@@ -213,6 +245,10 @@ class HandlerAvatarLAM(HandlerBase):
             if speech_text is not None:
                 output.add_meta("avatar_speech_text", speech_text)
             dur_inference = time.monotonic() - t_start
+            if not context.first_motion_emitted:
+                context.first_motion_emitted = True
+                if context.shared_states is not None and hasattr(context.shared_states, "mark_lam_first_motion"):
+                    context.shared_states.mark_lam_first_motion(speech_id)
             logger.info(f"Inference on {audio_segment.shape[-1] / context.config.audio_sample_rate:.2f} second audio "
                         f"finished in {dur_inference * 1000} milliseconds. Got output: {str(output)}")
             context.submit_data(output)
@@ -220,6 +256,7 @@ class HandlerAvatarLAM(HandlerBase):
             context.last_speech_id = speech_id
             if need_flush:
                 context.last_speech_id = None
+                context.first_motion_emitted = False
                 self._end_emotion(context, speech_id)
 
     def _update_emotion(self, context: AvatarLAMContext, speech_id: Optional[str]):

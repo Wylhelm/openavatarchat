@@ -1,13 +1,12 @@
-// Life motion while the avatar is not speaking.
+// Life motion while the avatar is idle, listening, thinking, or speaking.
 // LAM only emits ARKit frames for reply audio, and the renderer then zeroes every
-// morph, which is the statue. Listening and thinking already exist as chat states;
-// the asset has no listen clip (it replays idle). Brows and blinks are morphs.
-// A nod and a breath are rotations and a few millimetres on the head bone, applied
-// after the skeletal clip so they disappear as soon as she answers.
+// morph when silent. Listening and thinking are driven procedurally, while speaking
+// combines natural 3-axis head/neck prosody, breathing, and gaze micro-saccades with
+// smooth cross-fading into and out of LAM lip-sync frames.
 
 export type LifeMode = 'idle' | 'listen' | 'think' | 'speak'
 
-const FACE_CHANNELS = [
+export const FACE_CHANNELS = [
   'browDownLeft',
   'browDownRight',
   'browInnerUp',
@@ -62,6 +61,19 @@ const FACE_CHANNELS = [
   'tongueOut',
 ] as const
 
+const GAZE_CHANNELS = new Set([
+  'eyeLookDownLeft',
+  'eyeLookDownRight',
+  'eyeLookInLeft',
+  'eyeLookInRight',
+  'eyeLookOutLeft',
+  'eyeLookOutRight',
+  'eyeLookUpLeft',
+  'eyeLookUpRight',
+])
+
+const EYE_WIDE_CHANNELS = new Set(['eyeWideLeft', 'eyeWideRight'])
+
 // Same 7-frame blink shapes the LAM post-process uses, played over ~160 ms.
 const BLINK_PATTERNS = [
   [0.365, 0.95, 0.956, 0.917, 0.367, 0.119, 0.025],
@@ -75,12 +87,185 @@ const BLINK_DURATION = 0.16
 // is about 5.5 mm in the scene. Nod angles are radians on the bone's local X
 // (chin down). Listening is a clearer nod than thinking.
 const BREATH_AMP = 0.55
-const DRIFT_X = 0.03
-const DRIFT_Z = 0.016
+const DRIFT_X = 0.032
+const DRIFT_Y = 0.026
+const DRIFT_Z = 0.018
 const NOD_LISTEN = 0.14
 const NOD_THINK = 0.08
+const SPEECH_NOD_GAIN = 0.095
+const SPEECH_YAW_GAIN = 0.045
+const SPEECH_ROLL_GAIN = 0.025
+const TRACK_HEAD_YAW_MAX = 0.28 // ~16 deg max horizontal head turn toward user
+const TRACK_HEAD_PITCH_MAX = 0.11 // ~6.3 deg max vertical head tilt toward user
+const TRACK_HEAD_ROLL_MAX = 0.04 // subtle empathetic head tilt when looking sideways
+const TRACK_GAZE_X_MAX = 0.48
+const TRACK_GAZE_Y_MAX = 0.32
+
+export type AvatarEmotion =
+  | 'neutral'
+  | 'joy'
+  | 'sadness'
+  | 'surprise'
+  | 'anger'
+  | 'fear'
+  | 'disgust'
+
+// Lingering mood morph targets applied in Idle/Listening/Thinking so the avatar
+// keeps an emotional afterglow between turns rather than snapping to a blank face.
+const MOOD_PRESETS: Record<AvatarEmotion, Record<string, number>> = {
+  neutral: {},
+  joy: {
+    mouthSmileLeft: 0.24,
+    mouthSmileRight: 0.23,
+    cheekSquintLeft: 0.16,
+    cheekSquintRight: 0.16,
+    mouthDimpleLeft: 0.08,
+    mouthDimpleRight: 0.08,
+    browOuterUpLeft: 0.06,
+    browOuterUpRight: 0.06,
+  },
+  sadness: {
+    browInnerUp: 0.28,
+    mouthFrownLeft: 0.15,
+    mouthFrownRight: 0.15,
+    mouthPressLeft: 0.09,
+    mouthPressRight: 0.09,
+    eyeSquintLeft: 0.08,
+    eyeSquintRight: 0.08,
+  },
+  surprise: {
+    browInnerUp: 0.22,
+    browOuterUpLeft: 0.2,
+    browOuterUpRight: 0.2,
+    eyeWideLeft: 0.18,
+    eyeWideRight: 0.18,
+    jawOpen: 0.04,
+  },
+  anger: {
+    browDownLeft: 0.22,
+    browDownRight: 0.22,
+    eyeSquintLeft: 0.15,
+    eyeSquintRight: 0.15,
+    noseSneerLeft: 0.1,
+    noseSneerRight: 0.1,
+    mouthPressLeft: 0.14,
+    mouthPressRight: 0.14,
+    jawForward: 0.05,
+  },
+  fear: {
+    browInnerUp: 0.26,
+    browOuterUpLeft: 0.14,
+    browOuterUpRight: 0.14,
+    eyeWideLeft: 0.15,
+    eyeWideRight: 0.15,
+    mouthStretchLeft: 0.08,
+    mouthStretchRight: 0.08,
+  },
+  disgust: {
+    noseSneerLeft: 0.2,
+    noseSneerRight: 0.18,
+    browDownLeft: 0.12,
+    browDownRight: 0.12,
+    mouthUpperUpLeft: 0.1,
+    mouthUpperUpRight: 0.08,
+  },
+}
+
+const MOOD_PITCH_OFFSET: Record<AvatarEmotion, number> = {
+  neutral: 0,
+  joy: -0.02, // slight confident chin lift
+  sadness: 0.045, // empathetic downward bow
+  surprise: -0.03,
+  anger: 0.02,
+  fear: 0.015,
+  disgust: -0.01,
+}
 
 const LIFE_FLAG = '__avatarLifeWrapped'
+const ANIM_PATCH_FLAG = '__avatarLifeAnimPatched'
+
+export function sanitizeAnimManager(animManager: any, chatState?: string) {
+  if (!animManager) return
+  const ctor = animManager.constructor
+  const stateBuckets = [
+    animManager.hello,
+    animManager.idle,
+    animManager.listen,
+    animManager.think,
+    animManager.speak,
+  ]
+
+  // 1. Ensure all cloned actions (such as listen.actions[0]) are registered in
+  // AnimationManager.actions and patch PrepareCrossFade against self-crossfades.
+  if (ctor && !animManager[ANIM_PATCH_FLAG]) {
+    animManager[ANIM_PATCH_FLAG] = true
+    if (Array.isArray(ctor.actions)) {
+      for (const bucket of stateBuckets) {
+        const actions = bucket?.actions
+        if (!Array.isArray(actions)) continue
+        for (const action of actions) {
+          if (action && !ctor.actions.includes(action)) {
+            ctor.actions.push(action)
+          }
+        }
+      }
+    }
+    if (typeof ctor.PrepareCrossFade === 'function' && !ctor[ANIM_PATCH_FLAG]) {
+      ctor[ANIM_PATCH_FLAG] = true
+      const origPrepare = ctor.PrepareCrossFade.bind(ctor)
+      ctor.PrepareCrossFade = (startAction: any, endAction: any, duration: number) => {
+        if (!endAction) return
+        if (!startAction || startAction === endAction) {
+          ctor.UnPauseAllActions?.()
+          endAction.enabled = true
+          endAction.paused = false
+          endAction.setEffectiveTimeScale?.(1)
+          endAction.setEffectiveWeight?.(1)
+          endAction.play?.()
+          return
+        }
+        origPrepare(startAction, endAction, duration)
+      }
+    }
+  }
+
+  // 2. Unblock Think state machine when stage 2 (think_part_3) gets stuck
+  // either because state re-entered 'Thinking' during stage 2 or stage 2 clamped/paused at end.
+  const think = animManager.think
+  if (think?.isPlaying && Array.isArray(think.actions)) {
+    const stage2 = think.actions[2]
+    if (think.stage === 2 && stage2) {
+      const clipDur = stage2.getClip?.()?.duration ?? 0
+      const nearEnd = clipDur > 0 && stage2.time >= clipDur - 0.31
+      if (chatState === 'Thinking' || stage2.paused || nearEnd) {
+        think.isPlaying = false
+        if (ctor) {
+          ctor.LastAction = stage2
+          ctor.CurPlaying = undefined
+        }
+        if (chatState === 'Thinking') {
+          think.update?.(chatState)
+        }
+      }
+    }
+  }
+
+  // 3. Ensure the currently active state's current stage action is never left paused/disabled
+  for (const bucket of stateBuckets) {
+    if (!bucket?.isPlaying || !Array.isArray(bucket.actions)) continue
+    const activeAction = bucket.actions[bucket.stage ?? 0]
+    if (!activeAction) continue
+    if (activeAction.paused || !activeAction.enabled) {
+      activeAction.enabled = true
+      activeAction.paused = false
+      activeAction.setEffectiveTimeScale?.(1)
+      if ((activeAction.getEffectiveWeight?.() ?? 1) <= 0.01) {
+        activeAction.setEffectiveWeight?.(1)
+      }
+      activeAction.play?.()
+    }
+  }
+}
 
 export function lifeMode(state: string): LifeMode {
   if (state === 'Listening') return 'listen'
@@ -89,13 +274,13 @@ export function lifeMode(state: string): LifeMode {
   return 'idle'
 }
 
-function blankFace(): Record<string, number> {
+export function blankFace(): Record<string, number> {
   const face: Record<string, number> = {}
   for (const name of FACE_CHANNELS) face[name] = 0
   return face
 }
 
-function follow(current: number, target: number, dt: number, tau: number): number {
+export function follow(current: number, target: number, dt: number, tau: number): number {
   if (dt <= 0) return current
   return current + (target - current) * (1 - Math.exp(-dt / tau))
 }
@@ -111,25 +296,26 @@ function blinkSample(elapsed: number, pattern: number, scale: number): number {
   return (a + (b - a) * t) * scale
 }
 
-function rotateLocal(
+export function rotateLocal(
   q: { x: number; y: number; z: number; w: number },
-  axis: 'x' | 'z',
+  axis: 'x' | 'y' | 'z',
   angle: number
 ) {
   if (Math.abs(angle) < 1e-5) return
   const half = angle * 0.5
   const s = Math.sin(half)
   const bx = axis === 'x' ? s : 0
+  const by = axis === 'y' ? s : 0
   const bz = axis === 'z' ? s : 0
   const bw = Math.cos(half)
   const ax = q.x
   const ay = q.y
   const az = q.z
   const aw = q.w
-  q.x = aw * bx + ax * bw + ay * bz - az * 0
-  q.y = aw * 0 - ax * bz + ay * bw + az * bx
-  q.z = aw * bz + ax * 0 - ay * bx + az * bw
-  q.w = aw * bw - ax * bx - ay * 0 - az * bz
+  q.x = aw * bx + ax * bw + ay * bz - az * by
+  q.y = aw * by - ax * bz + ay * bw + az * bx
+  q.z = aw * bz + ax * by - ay * bx + az * bw
+  q.w = aw * bw - ax * bx - ay * by - az * bz
 }
 
 export interface LifeBone {
@@ -142,7 +328,16 @@ export class AvatarLife {
   nod = 0
   breath = 0
   driftX = 0
+  driftY = 0
   driftZ = 0
+  gazeX = 0
+  gazeY = 0
+  trackHeadX = 0
+  trackHeadY = 0
+  mood: AvatarEmotion = 'neutral'
+  moodIntensity = 0
+  empatheticSmile = 0
+  speechPresence = 0
 
   private time = 0
   private lastNow = -1
@@ -157,40 +352,209 @@ export class AvatarLife {
   private presence = 0
   private shape: 'listen' | 'think' = 'listen'
   private mode: LifeMode = 'idle'
+  private targetGazeX = 0
+  private targetGazeY = 0
+  private saccadeOffsetX = 0
+  private saccadeOffsetY = 0
+  private userTargetX = 0
+  private userTargetY = 0
+  private userTracked = false
+  private userSmile = 0
+  private moodPitch = 0
+  private moodWeights: Record<string, number> = {}
+  private nextSaccade = 0.8
+  private speechEnergy = 0
+  private speechNod = 0
+  private lastSpeechWeights: Record<string, number> | null = null
   private rand: () => number
 
   constructor(rand: () => number = Math.random) {
     this.rand = rand
     this.nextBlink = 0.7 + this.rand() * 0.8
+    this.nextSaccade = 0.6 + this.rand() * 1.1
   }
 
-  tick(state: string, nowSeconds?: number): Record<string, number> {
+  /**
+   * Set the avatar's current emotional mood so it lingers naturally between sentences.
+   */
+  setEmotion(emotion: string) {
+    const normalized = (emotion || 'neutral').trim().toLowerCase() as AvatarEmotion
+    if (normalized in MOOD_PRESETS) {
+      this.mood = normalized
+      this.moodIntensity = normalized === 'neutral' ? 0 : 1.0
+    }
+  }
+
+  /**
+   * Trigger an immediate warm empathetic nod when the user nods while she is actively listening.
+   */
+  triggerEmpatheticNod() {
+    if (this.mode !== 'listen') return
+    if (this.nodT < 0) {
+      this.nodT = 0
+      this.nodAmp = NOD_LISTEN
+      this.nodDur = 0.95
+    }
+    this.empatheticSmile = Math.max(this.empatheticSmile, 0.22)
+  }
+
+  /**
+   * Update the user's normalized position and empathetic cues from the webcam tracker.
+   * @param x Horizontal position in [-1, 1] (positive = user is to the right of screen)
+   * @param y Vertical position in [-1, 1] (positive = user is higher up)
+   * @param active Whether a user is currently detected in the camera feed
+   * @param cues Optional user gesture cues (nodding, smile)
+   */
+  setUserTarget(
+    x: number,
+    y: number,
+    active = true,
+    cues?: { nodding?: boolean; smile?: number }
+  ) {
+    if (!active || !Number.isFinite(x) || !Number.isFinite(y)) {
+      this.userTracked = false
+      this.userTargetX = 0
+      this.userTargetY = 0
+      this.userSmile = 0
+      return
+    }
+    this.userTracked = true
+    this.userTargetX = Math.max(-1, Math.min(1, x))
+    this.userTargetY = Math.max(-1, Math.min(1, y))
+    if (cues?.smile !== undefined && Number.isFinite(cues.smile)) {
+      this.userSmile = Math.max(0, Math.min(1, cues.smile))
+    }
+    if (cues?.nodding) {
+      this.triggerEmpatheticNod()
+    }
+  }
+
+  tick(
+    state: string,
+    nowSeconds?: number,
+    speechFrame?: Record<string, number> | null
+  ): Record<string, number> {
     const dt = this.advance(nowSeconds)
     const mode = lifeMode(state)
     this.onMode(mode)
+
+    const rawJaw = speechFrame ? Math.max(0, speechFrame.jawOpen ?? 0) : 0
+    const rawMouth = speechFrame
+      ? Math.max(
+          rawJaw,
+          (speechFrame.mouthFunnel ?? 0) * 0.6,
+          (speechFrame.mouthPucker ?? 0) * 0.5,
+          ((speechFrame.mouthLowerDownLeft ?? 0) + (speechFrame.mouthLowerDownRight ?? 0)) * 0.4
+        )
+      : 0
+    const activeSpeech = speechFrame !== null && speechFrame !== undefined
+    this.speechEnergy = follow(this.speechEnergy, activeSpeech ? rawMouth : 0, dt, 0.08)
+
     const blink = this.advanceBlink(dt, mode)
     const nodTarget = this.advanceNod(dt, mode)
     this.nod = follow(this.nod, nodTarget, dt, 0.09)
-    const alive = mode !== 'speak'
-    this.driftX = follow(this.driftX, alive ? Math.sin(this.time * 0.56) * DRIFT_X : 0, dt, 0.25)
-    this.driftZ = follow(
-      this.driftZ,
-      alive ? Math.sin(this.time * 0.82 + 1.1) * DRIFT_Z : 0,
+
+    // Calm, low-frequency organic head drift across all 3 rotational axes.
+    const driftScale = mode === 'speak' ? 0.65 : 1.0
+    const targetDriftX = Math.sin(this.time * 0.56) * DRIFT_X * driftScale
+    const targetDriftY = Math.sin(this.time * 0.38 + 0.5) * DRIFT_Y * driftScale
+    const targetDriftZ = Math.sin(this.time * 0.82 + 1.1) * DRIFT_Z * driftScale
+
+    this.driftX = follow(this.driftX, targetDriftX, dt, 0.35)
+    this.driftY = follow(this.driftY, targetDriftY, dt, 0.38)
+    this.driftZ = follow(this.driftZ, targetDriftZ, dt, 0.35)
+
+    // Prosodic syllable-coupled head nod & subtle turn while speaking
+    const targetSpeechNod =
+      mode === 'speak'
+        ? this.speechEnergy * SPEECH_NOD_GAIN * (0.7 + 0.3 * Math.sin(this.time * 3.1))
+        : 0
+    this.speechNod = follow(this.speechNod, targetSpeechNod, dt, 0.09)
+
+    // Continuous natural breathing in all modes
+    const breathFreq = mode === 'speak' ? 1.55 : 1.38
+    const breathScale = mode === 'speak' ? 0.72 : 1.0
+    this.breath = follow(
+      this.breath,
+      Math.sin(this.time * breathFreq) * BREATH_AMP * breathScale,
       dt,
-      0.25
+      0.3
     )
-    this.breath = follow(this.breath, alive ? Math.sin(this.time * 1.38) * BREATH_AMP : 0, dt, 0.3)
+
+    this.advanceGaze(dt, mode)
+
+    // Smoothly follow the user's webcam position with natural head/neck inertia
+    const headTrackScale = mode === 'think' ? 0.55 : 1.0
+    const targetHeadX = this.userTracked
+      ? this.userTargetX * TRACK_HEAD_YAW_MAX * headTrackScale
+      : 0
+    const deadzoneY = Math.abs(this.userTargetY) < 0.04 ? 0 : this.userTargetY
+    const targetHeadY = this.userTracked
+      ? -deadzoneY * TRACK_HEAD_PITCH_MAX * headTrackScale
+      : 0
+    this.trackHeadX = follow(this.trackHeadX, targetHeadX, dt, 0.38)
+    this.trackHeadY = follow(this.trackHeadY, targetHeadY, dt, 0.45)
+
+    // Update lingering mood afterglow (decays gently toward a 0.28 baseline over ~25s)
+    const moodFloor = this.mood === 'neutral' ? 0 : 0.28
+    const moodDecayTau = mode === 'speak' ? 8.0 : 22.0
+    this.moodIntensity = follow(this.moodIntensity, moodFloor, dt, moodDecayTau)
+    this.moodPitch = follow(
+      this.moodPitch,
+      (MOOD_PITCH_OFFSET[this.mood] ?? 0) * this.moodIntensity,
+      dt,
+      0.35
+    )
+
+    // Smoothly interpolate individual mood morphs so mood switches never snap
+    const activePreset = MOOD_PRESETS[this.mood] ?? {}
+    for (const name of FACE_CHANNELS) {
+      const targetVal = (activePreset[name] ?? 0) * this.moodIntensity
+      const prevVal = this.moodWeights[name] ?? 0
+      if (targetVal > 0 || prevVal > 0.001) {
+        this.moodWeights[name] = follow(prevVal, targetVal, dt, 0.28)
+      }
+    }
+
+    // Decay empathetic smile boost from user nods/smiles
+    const targetEmpSmile = this.userTracked ? this.userSmile * 0.22 : 0
+    this.empatheticSmile = follow(this.empatheticSmile, targetEmpSmile, dt, 0.65)
+
     const attentive = mode === 'listen' || mode === 'think'
     this.presence = follow(this.presence, attentive ? 1 : 0, dt, 0.16)
     if (attentive) this.shape = mode
-    this.weights = this.composeFace(blink)
-    return this.weights
+
+    const lifeFace = this.composeFace(blink, mode)
+    this.weights = lifeFace
+
+    if (speechFrame === undefined) {
+      return lifeFace
+    }
+
+    return this.blendWithSpeech(lifeFace, speechFrame, dt)
   }
 
   applyBones(head: LifeBone, neck: LifeBone | null) {
-    rotateLocal(head.quaternion, 'x', this.nod * 0.72 + this.driftX)
-    rotateLocal(head.quaternion, 'z', this.driftZ)
-    if (neck) rotateLocal(neck.quaternion, 'x', this.nod * 0.28)
+    const pitch = this.nod + this.speechNod + this.driftX + this.trackHeadY + this.moodPitch
+    const yaw =
+      this.driftY +
+      this.trackHeadX +
+      (this.mode === 'speak' ? Math.sin(this.time * 1.9) * this.speechEnergy * SPEECH_YAW_GAIN : 0)
+    const roll =
+      this.driftZ +
+      this.trackHeadX * (TRACK_HEAD_ROLL_MAX / TRACK_HEAD_YAW_MAX) +
+      (this.mode === 'speak'
+        ? Math.cos(this.time * 1.45) * this.speechEnergy * SPEECH_ROLL_GAIN
+        : 0)
+
+    rotateLocal(head.quaternion, 'x', pitch * 0.72)
+    rotateLocal(head.quaternion, 'y', yaw * 0.7)
+    rotateLocal(head.quaternion, 'z', roll * 0.75)
+    if (neck) {
+      rotateLocal(neck.quaternion, 'x', pitch * 0.28)
+      rotateLocal(neck.quaternion, 'y', yaw * 0.3)
+      rotateLocal(neck.quaternion, 'z', roll * 0.25)
+    }
     head.position.y += this.breath
   }
 
@@ -212,7 +576,62 @@ export class AvatarLife {
     if (attentive && !wasAttentive) {
       this.nextNod = Math.min(this.nextNod, this.time + 0.35 + this.rand() * 0.4)
     }
+    if (mode !== this.mode) {
+      // Trigger an immediate gaze update on mode shift (e.g., look up on think, lock eyes on listen)
+      this.nextSaccade = Math.min(this.nextSaccade, this.time + 0.08)
+    }
     this.mode = mode
+  }
+
+  private advanceGaze(dt: number, mode: LifeMode) {
+    if (this.time >= this.nextSaccade) {
+      const r1 = this.rand() * 2 - 1
+      const r2 = this.rand() * 2 - 1
+      const eyeContactBias = this.rand() < 0.48
+      if (mode === 'think') {
+        // Cognitive gaze aversion: look up and slightly to one side, occasionally glancing back
+        if (this.rand() < 0.25) {
+          this.saccadeOffsetX = r1 * 0.06
+          this.saccadeOffsetY = 0.08 + Math.abs(r2) * 0.08
+        } else {
+          this.saccadeOffsetX = (r1 >= 0 ? 1 : -1) * (0.08 + Math.abs(r1) * 0.14)
+          this.saccadeOffsetY = 0.18 + Math.abs(r2) * 0.12
+        }
+        this.nextSaccade = this.time + 0.9 + this.rand() * 1.4
+      } else if (mode === 'listen') {
+        // Attentive eye triangle saccades (left eye -> right eye -> bridge)
+        this.saccadeOffsetX = eyeContactBias ? 0 : r1 * 0.045
+        this.saccadeOffsetY = eyeContactBias ? 0 : r2 * 0.03
+        this.nextSaccade = this.time + 1.4 + this.rand() * 2.1
+      } else if (mode === 'speak') {
+        // Expressive conversational saccades that return to eye contact on emphasis
+        const centered = eyeContactBias || this.speechEnergy > 0.28
+        this.saccadeOffsetX = centered ? r1 * 0.025 : r1 * 0.075
+        this.saccadeOffsetY = centered ? r2 * 0.02 : r2 * 0.05
+        this.nextSaccade = this.time + 1.0 + this.rand() * 1.8
+      } else {
+        // Idle: calm micro-saccades around the user's position (or center)
+        this.saccadeOffsetX = eyeContactBias ? 0 : r1 * 0.05
+        this.saccadeOffsetY = eyeContactBias ? 0 : r2 * 0.03
+        this.nextSaccade = this.time + 2.2 + this.rand() * 2.8
+      }
+    }
+
+    // Anchor gaze on the tracked user (with VOR compensation as the head catches up)
+    const userAnchorScale = mode === 'think' ? 0.35 : 1.0
+    const userGazeX = this.userTracked
+      ? (this.userTargetX * TRACK_GAZE_X_MAX - this.trackHeadX * 0.45) * userAnchorScale
+      : 0
+    const userGazeY = this.userTracked
+      ? (this.userTargetY * TRACK_GAZE_Y_MAX + this.trackHeadY * 0.45) * userAnchorScale
+      : 0
+
+    this.targetGazeX = Math.max(-0.65, Math.min(0.65, userGazeX + this.saccadeOffsetX))
+    this.targetGazeY = Math.max(-0.55, Math.min(0.55, userGazeY + this.saccadeOffsetY))
+
+    // Smooth eye tracking (tau ~90 ms) without abrupt twitching
+    this.gazeX = follow(this.gazeX, this.targetGazeX, dt, 0.09)
+    this.gazeY = follow(this.gazeY, this.targetGazeY, dt, 0.09)
   }
 
   private advanceBlink(dt: number, mode: LifeMode): number {
@@ -260,10 +679,59 @@ export class AvatarLife {
     return Math.sin(Math.PI * u) * this.nodAmp
   }
 
-  private composeFace(blink: number): Record<string, number> {
+  private applyGazeToFace(face: Record<string, number>, blink: number) {
+    const openFactor = Math.max(0, 1 - blink * 0.9)
+    const gx = this.gazeX * openFactor
+    const gy = this.gazeY * openFactor
+
+    if (gx >= 0) {
+      face.eyeLookOutRight = Math.min(1, (face.eyeLookOutRight ?? 0) + gx)
+      face.eyeLookInLeft = Math.min(1, (face.eyeLookInLeft ?? 0) + gx)
+    } else {
+      const mag = -gx
+      face.eyeLookOutLeft = Math.min(1, (face.eyeLookOutLeft ?? 0) + mag)
+      face.eyeLookInRight = Math.min(1, (face.eyeLookInRight ?? 0) + mag)
+    }
+
+    if (gy >= 0) {
+      face.eyeLookUpLeft = Math.min(1, (face.eyeLookUpLeft ?? 0) + gy)
+      face.eyeLookUpRight = Math.min(1, (face.eyeLookUpRight ?? 0) + gy)
+    } else {
+      const down = -gy
+      face.eyeLookDownLeft = Math.min(1, (face.eyeLookDownLeft ?? 0) + down)
+      face.eyeLookDownRight = Math.min(1, (face.eyeLookDownRight ?? 0) + down)
+      // Upper eyelids naturally follow large downward gaze only (avoids micro-saccade eyelid flutter)
+      if (down > 0.12) {
+        const lidDrop = (down - 0.12) * 0.12
+        face.eyeBlinkLeft = Math.min(1, (face.eyeBlinkLeft ?? 0) + lidDrop)
+        face.eyeBlinkRight = Math.min(1, (face.eyeBlinkRight ?? 0) + lidDrop)
+      }
+    }
+  }
+
+  private composeFace(blink: number, mode: LifeMode): Record<string, number> {
     const face = blankFace()
     face.eyeBlinkLeft = blink
     face.eyeBlinkRight = blink
+
+    // Steady idle micro-warmth + empathetic smile mimicry from webcam (no oscillation at rest)
+    const baseWarmth = mode === 'idle' ? 0.025 : 0
+    const sharedSmile = Math.min(0.32, baseWarmth + this.empatheticSmile)
+    face.mouthSmileLeft = sharedSmile
+    face.mouthSmileRight = sharedSmile * 0.94
+    face.cheekSquintLeft = sharedSmile * 0.55
+    face.cheekSquintRight = sharedSmile * 0.55
+
+    // Apply lingering emotional mood morphs (blink-safe for eyeWide)
+    const openFactor = Math.max(0, 1 - blink * 0.9)
+    for (const [name, val] of Object.entries(this.moodWeights)) {
+      if (val <= 0.001) continue
+      const eff = EYE_WIDE_CHANNELS.has(name) ? val * openFactor : val
+      face[name] = Math.min(1, Math.max(face[name] ?? 0, (face[name] ?? 0) + eff))
+    }
+
+    this.applyGazeToFace(face, blink)
+
     const p = this.presence
     if (p < 0.01) return face
     const wobble = 0.5 + 0.5 * Math.sin(this.time * 1.7)
@@ -274,18 +742,63 @@ export class AvatarLife {
       face.mouthPressLeft = 0.2 * p
       face.mouthPressRight = 0.15 * p
       face.mouthShrugLower = 0.14 * p
+      face.mouthSmileLeft = Math.max(face.mouthSmileLeft, 0.08 * p)
+      face.mouthSmileRight = Math.max(face.mouthSmileRight, 0.07 * p)
+      face.cheekSquintLeft = Math.max(face.cheekSquintLeft, 0.06 * p)
+      face.cheekSquintRight = Math.max(face.cheekSquintRight, 0.05 * p)
       face.jawOpen = 0.04 * p
     } else {
       face.browInnerUp = (0.34 + 0.06 * wobble) * p
       face.browOuterUpLeft = 0.18 * p
       face.browOuterUpRight = 0.16 * p
-      face.eyeLookUpLeft = 0.22 * p
-      face.eyeLookUpRight = 0.22 * p
+      face.eyeLookUpLeft = Math.max(face.eyeLookUpLeft, 0.22 * p * (1 - blink))
+      face.eyeLookUpRight = Math.max(face.eyeLookUpRight, 0.22 * p * (1 - blink))
       face.mouthPressLeft = 0.12 * p
       face.mouthPressRight = 0.1 * p
       face.mouthShrugLower = 0.08 * p
     }
     return face
+  }
+
+  private blendWithSpeech(
+    lifeFace: Record<string, number>,
+    speechFrame: Record<string, number> | null,
+    dt: number
+  ): Record<string, number> {
+    const hasSpeech = speechFrame !== null && speechFrame !== undefined
+    if (hasSpeech) {
+      this.lastSpeechWeights = speechFrame
+    }
+    const tau = hasSpeech ? 0.1 : 0.16
+    this.speechPresence = follow(this.speechPresence, hasSpeech ? 1 : 0, dt, tau)
+
+    if (this.speechPresence < 0.005 || !this.lastSpeechWeights) {
+      return lifeFace
+    }
+
+    const sp = this.speechPresence
+    const src = this.lastSpeechWeights
+    const out = blankFace()
+    const speechBlink = Math.max(src.eyeBlinkLeft ?? 0, src.eyeBlinkRight ?? 0, lifeFace.eyeBlinkLeft ?? 0)
+    const blinkDamp = Math.max(0, 1 - speechBlink * 0.9)
+
+    for (const name of FACE_CHANNELS) {
+      const lifeVal = lifeFace[name] ?? 0
+      const speechVal = src[name] ?? 0
+      if (GAZE_CHANNELS.has(name)) {
+        // Combine speech gaze with live conversational micro-saccades, damped during blinks
+        out[name] = Math.min(1, (speechVal * sp + lifeVal * (1 - sp * 0.35)) * blinkDamp)
+      } else if (EYE_WIDE_CHANNELS.has(name)) {
+        // Suppress eyeWide during blinks so eyelids close completely
+        out[name] = Math.min(1, (lifeVal * (1 - sp) + speechVal * sp) * blinkDamp)
+      } else if (name === 'eyeBlinkLeft' || name === 'eyeBlinkRight') {
+        out[name] = Math.min(1, lifeVal * (1 - sp) + speechVal * sp)
+      } else {
+        out[name] = Math.min(1, lifeVal * (1 - sp) + speechVal * sp)
+      }
+    }
+
+    return out
   }
 }
 
@@ -300,9 +813,60 @@ export function attachAvatarLife(renderer: any, life: AvatarLife): boolean {
   const head = bones.find((bone) => bone.name === 'head')
   const neck = bones.find((bone) => bone.name === 'neckLower') ?? null
   if (!head) return false
+
+  // Save clean post-mixer bone transforms so AvatarLife offsets never accumulate
+  // across frames when Three.js PropertyMixer skips unchanged/paused bone tracks.
+  let baseHeadY = head.position.y
+  let baseHeadQuat = {
+    x: head.quaternion.x,
+    y: head.quaternion.y,
+    z: head.quaternion.z,
+    w: head.quaternion.w,
+  }
+  let baseNeckQuat = neck
+    ? {
+        x: neck.quaternion.x,
+        y: neck.quaternion.y,
+        z: neck.quaternion.z,
+        w: neck.quaternion.w,
+      }
+    : null
+
+  sanitizeAnimManager(renderer?.animManager, renderer?.chatState)
+
   const original = mixer.update.bind(mixer)
   mixer.update = (delta: number) => {
+    head.position.y = baseHeadY
+    head.quaternion.x = baseHeadQuat.x
+    head.quaternion.y = baseHeadQuat.y
+    head.quaternion.z = baseHeadQuat.z
+    head.quaternion.w = baseHeadQuat.w
+    if (neck && baseNeckQuat) {
+      neck.quaternion.x = baseNeckQuat.x
+      neck.quaternion.y = baseNeckQuat.y
+      neck.quaternion.z = baseNeckQuat.z
+      neck.quaternion.w = baseNeckQuat.w
+    }
+
+    sanitizeAnimManager(renderer?.animManager, renderer?.chatState)
     original(delta)
+
+    baseHeadY = head.position.y
+    baseHeadQuat = {
+      x: head.quaternion.x,
+      y: head.quaternion.y,
+      z: head.quaternion.z,
+      w: head.quaternion.w,
+    }
+    if (neck) {
+      baseNeckQuat = {
+        x: neck.quaternion.x,
+        y: neck.quaternion.y,
+        z: neck.quaternion.z,
+        w: neck.quaternion.w,
+      }
+    }
+
     life.applyBones(head, neck)
   }
   mixer[LIFE_FLAG] = true

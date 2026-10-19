@@ -175,7 +175,42 @@ class RtcStream(AsyncAudioVideoStreamHandler):
             async def process_chat_history():
                 role = None
                 chat_id = None
+                last_human_speaking = False
+                last_emotion_seq = 0
+                last_barge_in_seq = 0
                 while not self.quit.is_set():
+                    if self.client_session_delegate is not None and self.client_session_delegate.shared_states is not None:
+                        shared = self.client_session_delegate.shared_states
+                        barge_in_seq = int(getattr(shared, "barge_in_seq", 0))
+                        if barge_in_seq != last_barge_in_seq:
+                            last_barge_in_seq = barge_in_seq
+                            try:
+                                self.chat_channel.send(json.dumps({
+                                    'type': 'avatar_interrupt',
+                                }))
+                            except Exception as e:
+                                logger.debug(f"Failed to send avatar_interrupt over data channel: {e}")
+                        speaking = bool(getattr(shared, "human_speaking", False))
+                        if speaking != last_human_speaking:
+                            last_human_speaking = speaking
+                            try:
+                                self.chat_channel.send(json.dumps({
+                                    'type': 'vad_state',
+                                    'speaking': 'true' if speaking else 'false',
+                                }))
+                            except Exception as e:
+                                logger.debug(f"Failed to send vad_state over data channel: {e}")
+                        emotion_seq = int(getattr(shared, "latest_emotion_seq", 0))
+                        if emotion_seq != last_emotion_seq:
+                            last_emotion_seq = emotion_seq
+                            emotion_name = str(getattr(shared, "latest_avatar_emotion", "neutral") or "neutral")
+                            try:
+                                self.chat_channel.send(json.dumps({
+                                    'type': 'avatar_emotion',
+                                    'emotion': emotion_name,
+                                }))
+                            except Exception as e:
+                                logger.debug(f"Failed to send avatar_emotion over data channel: {e}")
                     chat_data = await self.client_session_delegate.get_data(EngineChannelType.TEXT)
                     if chat_data is None or chat_data.data is None:
                         continue

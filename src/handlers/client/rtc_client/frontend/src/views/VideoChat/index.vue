@@ -170,6 +170,19 @@ function initChatDataChannel() {
           },
         ];
       }
+    } else if (data.type === 'vad_state') {
+      if (data.speaking === true || data.speaking === 'true') {
+        videoChatState.localAvatarRenderer?.startListening?.();
+      } else {
+        videoChatState.localAvatarRenderer?.stopListening?.();
+      }
+    } else if (data.type === 'avatar_emotion') {
+      if (typeof data.emotion === 'string') {
+        videoChatState.localAvatarRenderer?.setEmotion?.(data.emotion);
+      }
+    } else if (data.type === 'avatar_interrupt') {
+      videoChatState.replying = false;
+      videoChatState.localAvatarRenderer?.handleBargeIn?.();
     } else if (data.type === 'avatar_end') {
       videoChatState.replying = false;
     }

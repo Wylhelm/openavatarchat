@@ -5,6 +5,7 @@ import { EventTypes, PlayerEventTypes } from '@/interface/eventType'
 import { TYVoiceChatState } from '@/interface/voiceChat'
 import { AvatarLife, attachAvatarLife } from '@/utils/avatarLife'
 import { ensureBlob } from '@/utils/binaryUtils'
+import { WebcamFaceTracker } from '@/utils/webcamTracker'
 import EventEmitter from 'eventemitter3'
 // import * as GaussianSplats3D from "./gaussian-splats-3d.module.js";
 import { WsEventTypes } from '@/interface/eventType'
@@ -54,6 +55,7 @@ interface GaussianOptions {
   assetsPath: string
   ws: WS
   avatarScale?: number
+  trackingVideoElement?: HTMLVideoElement | null
   downloadProgress?: (percent: number) => void
   loadProgress?: (percent: number) => void
 }
@@ -73,13 +75,33 @@ export class GaussianAvatar extends EventEmitter {
   private _exited = false
   private _avatarScale = 1
   private _life = new AvatarLife()
+  private _trackingVideoElement: HTMLVideoElement | null = null
+  private _faceTracker = new WebcamFaceTracker((target) => {
+    if (target) {
+      this._life.setUserTarget(target.x, target.y, true, {
+        nodding: target.nodding,
+        smile: target.smile,
+      })
+    } else {
+      this._life.setUserTarget(0, 0, false)
+    }
+  })
   curState = TYVoiceChatState.Idle
   constructor(options: GaussianOptions) {
-    const { container, assetsPath, ws, avatarScale, downloadProgress, loadProgress } = options
+    const {
+      container,
+      assetsPath,
+      ws,
+      avatarScale,
+      trackingVideoElement,
+      downloadProgress,
+      loadProgress,
+    } = options
     super()
     if (avatarScale && avatarScale > 0) {
       this._avatarScale = avatarScale
     }
+    this._trackingVideoElement = trackingVideoElement ?? null
     this._avatarDivEle = container
     this._assetsPath = assetsPath
     this._ws = ws
@@ -115,6 +137,18 @@ export class GaussianAvatar extends EventEmitter {
   start() {
     this.getData()
     this.render()
+    if (this._trackingVideoElement) {
+      this._faceTracker.start(this._trackingVideoElement)
+    }
+  }
+
+  setTrackingVideoElement(videoEl: HTMLVideoElement | null | undefined) {
+    this._trackingVideoElement = videoEl ?? null
+    if (this._trackingVideoElement && !this._exited) {
+      this._faceTracker.start(this._trackingVideoElement)
+    } else {
+      this._faceTracker.stop()
+    }
   }
 
   async getData() {
@@ -209,10 +243,26 @@ export class GaussianAvatar extends EventEmitter {
     return this.curState
   }
   getArkitFaceFrame() {
-    this._life.tick(this.curState)
-    const speech = this._processor?.getArkitFaceFrame()?.arkitFace
-    if (speech) return speech
-    return this._life.weights
+    const speech = this._processor?.getArkitFaceFrame()?.arkitFace ?? null
+    return this._life.tick(this.curState, undefined, speech)
+  }
+  startListening(): void {
+    if (this.curState === TYVoiceChatState.Responding) {
+      return
+    }
+    this._clearThinkingTimer()
+    this.curState = TYVoiceChatState.Listening
+    this.emit(EventTypes.StateChanged, this.curState)
+  }
+  setEmotion(emotion: string): void {
+    this._life.setEmotion(emotion)
+  }
+  stopListening(): void {
+    if (this.curState === TYVoiceChatState.Listening) {
+      this._clearThinkingTimer()
+      this.curState = TYVoiceChatState.Idle
+      this.emit(EventTypes.StateChanged, this.curState)
+    }
   }
   startThinking(): void {
     if (this.curState === TYVoiceChatState.Responding) {
@@ -242,6 +292,12 @@ export class GaussianAvatar extends EventEmitter {
     this.curState = TYVoiceChatState.Idle
     this.emit(EventTypes.StateChanged, this.curState)
   }
+  handleBargeIn(): void {
+    this._clearThinkingTimer()
+    this._processor?.interrupt()
+    this.curState = TYVoiceChatState.Listening
+    this.emit(EventTypes.StateChanged, this.curState)
+  }
   sendSpeech(data: string | Int8Array | Uint8Array) {
     this._ws.send(data)
     this.curState = TYVoiceChatState.Listening
@@ -251,6 +307,7 @@ export class GaussianAvatar extends EventEmitter {
   exit() {
     if (this._exited) return
     this._exited = true
+    this._faceTracker.stop()
     this._clearThinkingTimer()
     const renderer = this._renderer
     this._renderer = null
@@ -293,7 +350,10 @@ export class GaussianAvatar extends EventEmitter {
       )
     })
     this._ws.on(WsEventTypes.WS_CLOSE, () => {
-      this.exit()
+      // Do not destroy the 3D avatar renderer on transient WebSocket close;
+      // WS auto-reconnects while the RTC session is active, and store/index.ts
+      // explicitly calls exit() when the session ends.
+      this._clearThinkingTimer()
     })
   }
 }

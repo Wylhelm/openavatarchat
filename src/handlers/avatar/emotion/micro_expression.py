@@ -3,20 +3,30 @@ from typing import Dict
 
 import numpy as np
 
-# Brow lift on stressed syllables, detected from the lip-sync jaw opening
-EMPHASIS_JAW_THRESHOLD = 0.3
+# Brow lift & cheek squint on stressed syllables, detected from the lip-sync jaw opening
+EMPHASIS_JAW_THRESHOLD = 0.28
 EMPHASIS_JAW_RANGE = 0.4
 EMPHASIS_SMOOTHING = 0.25
-EMPHASIS_MORPHS = {"browInnerUp": 0.15, "browOuterUpLeft": 0.1, "browOuterUpRight": 0.08}
+EMPHASIS_MORPHS = {
+    "browInnerUp": 0.15,
+    "browOuterUpLeft": 0.11,
+    "browOuterUpRight": 0.085,
+    "cheekSquintLeft": 0.06,
+    "cheekSquintRight": 0.055,
+}
 
-# Slow, slightly asymmetric drift so the face never looks frozen: (amplitude, frequency Hz, phase)
+# Multi-harmonic, slightly asymmetric drift so the face never looks frozen:
+# (amplitude, primary_freq_hz, phase, secondary_freq_hz, secondary_phase)
 DRIFT_MORPHS = {
-    "browOuterUpLeft": (0.05, 0.23, 0.0),
-    "browOuterUpRight": (0.04, 0.31, 1.3),
-    "mouthSmileLeft": (0.03, 0.17, 2.1),
-    "mouthSmileRight": (0.025, 0.13, 0.7),
-    "eyeSquintLeft": (0.03, 0.19, 0.4),
-    "eyeSquintRight": (0.03, 0.21, 1.9),
+    "browOuterUpLeft": (0.045, 0.23, 0.0, 0.51, 1.1),
+    "browOuterUpRight": (0.038, 0.31, 1.3, 0.47, 2.4),
+    "browInnerUp": (0.03, 0.19, 0.8, 0.43, 0.2),
+    "mouthSmileLeft": (0.03, 0.17, 2.1, 0.37, 0.5),
+    "mouthSmileRight": (0.026, 0.13, 0.7, 0.41, 1.8),
+    "cheekSquintLeft": (0.025, 0.17, 2.0, 0.39, 0.9),
+    "cheekSquintRight": (0.022, 0.15, 0.9, 0.35, 1.5),
+    "eyeSquintLeft": (0.028, 0.19, 0.4, 0.43, 2.2),
+    "eyeSquintRight": (0.028, 0.21, 1.9, 0.37, 0.6),
 }
 
 
@@ -35,10 +45,12 @@ def micro_expression_offsets(frames: np.ndarray, channel_index: Dict[str, int], 
         return offsets
 
     t = (state.frame + np.arange(frame_count, dtype=np.float32)) / frame_rate
-    for name, (amplitude, frequency, phase) in DRIFT_MORPHS.items():
+    for name, (amplitude, freq1, phase1, freq2, phase2) in DRIFT_MORPHS.items():
         index = channel_index.get(name)
         if index is not None:
-            offsets[:, index] += amplitude * 0.5 * (1.0 + np.sin(2.0 * np.pi * frequency * t + phase))
+            wave1 = 0.5 * (1.0 + np.sin(2.0 * np.pi * freq1 * t + phase1))
+            wave2 = 0.5 * (1.0 + np.sin(2.0 * np.pi * freq2 * t + phase2))
+            offsets[:, index] += amplitude * (0.65 * wave1 + 0.35 * wave2)
 
     jaw_index = channel_index.get("jawOpen")
     if jaw_index is not None:

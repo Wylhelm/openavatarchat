@@ -316,6 +316,7 @@ export const useVideoChatStore = defineStore('videoChatStore', {
             node.srcObject = this.localStream
             node.muted = true
             node?.play()
+            this.localAvatarRenderer?.setTrackingVideoElement?.(node)
           }
         })
     },
@@ -432,6 +433,7 @@ export const useVideoChatStore = defineStore('videoChatStore', {
         container: visionState.remoteVideoContainerRef!,
         assetsPath: this.avatarAssetsPath,
         avatarScale: this.avatarScale,
+        trackingVideoElement: visionState.localVideoRef,
         ws,
         loadProgress: (progress) => {
           console.log('gs loadProgress', progress)

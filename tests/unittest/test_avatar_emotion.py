@@ -68,6 +68,26 @@ class TestEmotionArkit(unittest.TestCase):
         self.assertFalse(np.any(blended[0]))
         self.assertTrue(np.allclose(blended[1], vec))
 
+    def test_blend_suppresses_eye_wide_during_blink(self):
+        vec = emotion_to_arkit("surprise", self.index)
+        base = np.zeros((2, 52), dtype=np.float32)
+        base[1, self.index["eyeBlinkLeft"]] = 0.95
+        base[1, self.index["eyeBlinkRight"]] = 0.95
+        blended = blend_emotion(base, vec, 1.0)
+        wide_idx = self.index["eyeWideLeft"]
+        self.assertGreater(blended[0, wide_idx], 0.5)
+        self.assertLess(blended[1, wide_idx], 0.05)
+
+    def test_soft_knee_compression_preserves_headroom(self):
+        vec = emotion_to_arkit("surprise", self.index)
+        base = np.full((2, 52), 0.7, dtype=np.float32)
+        blended_low = blend_emotion(base, vec, 0.5)
+        blended_high = blend_emotion(base, vec, 1.2)
+        brow_idx = self.index["browInnerUp"]
+        # Soft-knee keeps values strictly below 1.0 while preserving ordering
+        self.assertLess(blended_high[0, brow_idx], 1.0)
+        self.assertGreater(blended_high[0, brow_idx], blended_low[0, brow_idx])
+
     def test_ramp_up_carries_level(self):
         levels, level = ramp_levels(0.0, 5, ramp_frames=10)
         self.assertEqual(levels.shape, (5, 1))

@@ -71,25 +71,6 @@ class ChatDataSubmitter:
         )
 
 
-class ChatDataSubmitter:
-    def __init__(self, handler_name: str, output_info, session_context, sinks, outputs):
-        self.handler_name = handler_name
-        self.output_info = output_info
-        self.session_context = session_context
-        self.sinks = sinks
-        self.outputs = outputs
-
-    def submit(self, data: HandlerResultType):
-        ChatSession.submit_data(
-            data,
-            self.handler_name,
-            self.output_info,
-            self.session_context,
-            self.sinks,
-            self.outputs
-        )
-
-
 class ChatSession:
     input_type_mapping = {
         EngineChannelType.VIDEO: [ChatDataType.CAMERA_VIDEO],
@@ -106,6 +87,8 @@ class ChatSession:
 
         self.handlers: Dict[str, HandlerRecord] = {}
         self.input_pump_thread: Optional[threading.Thread] = None
+        if self.session_context.shared_states is not None:
+            self.session_context.shared_states.interrupt_callback = self.flush_downstream_queues
 
         for channel_type, input_queue in session_context.input_queues.items():
             target_types = self.input_type_mapping.get(channel_type, None)
@@ -216,7 +199,7 @@ class ChatSession:
                 except (queue.Empty, asyncio.QueueEmpty):
                     continue
             if len(input_data_list) == 0:
-                time.sleep(0.03)
+                time.sleep(0.005)
                 continue
             for input_source, input_data in input_data_list:
                 for target_type in input_source.target_types:
@@ -306,9 +289,8 @@ class ChatSession:
             output_info = {}
         while shared_states.active:
             try:
-                input_data = input_queue.get_nowait()
+                input_data = input_queue.get(timeout=0.05)
             except (queue.Empty, asyncio.QueueEmpty):
-                time.sleep(0.03)
                 continue
             handler_result = handler.handle(handler_env.context, input_data, output_info)
             if not isinstance(handler_result, Iterable):
@@ -388,18 +370,39 @@ class ChatSession:
     def get_timestamp(self):
         return self.session_context.get_timestamp()
 
+    def flush_downstream_queues(self):
+        """Flush avatar generation and output queues immediately on barge-in."""
+        downstream_types = (
+            ChatDataType.AVATAR_TEXT,
+            ChatDataType.AVATAR_AUDIO,
+            ChatDataType.AVATAR_VIDEO,
+            ChatDataType.AVATAR_MOTION_DATA,
+        )
+        for data_type in downstream_types:
+            for sink in self.data_sinks.get(data_type, []):
+                if sink.sink_queue is not None:
+                    while not sink.sink_queue.empty():
+                        try:
+                            sink.sink_queue.get_nowait()
+                        except Exception:
+                            break
+        for ch_type, out_queue in self.session_context.output_queues.items():
+            if ch_type == EngineChannelType.TEXT:
+                continue
+            while not out_queue.empty():
+                try:
+                    out_queue.get_nowait()
+                except Exception:
+                    break
+
     def emit_signal(self, signal: ChatSignal):
         # TODO this is temp implementation a full signal infrastructure is needed.
         if signal.source_type == ChatSignalSourceType.CLIENT:
             if signal.type == ChatSignalType.END:
                 self.session_context.shared_states.enable_vad = True
+                self.session_context.shared_states.avatar_speaking = False
             elif signal.type == ChatSignalType.INTERRUPT:
                 logger.warning("Barge-in: Interrupting avatar output queues!")
-                # Flush the output queues so the avatar stops talking
-                for queue in self.session_context.output_queues.values():
-                    while not queue.empty():
-                        try:
-                            queue.get_nowait()
-                        except:
-                            pass
+                self.session_context.shared_states.trigger_barge_in()
+                self.flush_downstream_queues()
                 self.session_context.shared_states.enable_vad = True

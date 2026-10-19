@@ -178,6 +178,7 @@ class GatewayManager:
         self.pending_text: dict[str, str] = {}
         self.pending_run_id: dict[str, str] = {}
         self.pending_resolved: dict[str, bool] = {}
+        self.pending_queues: dict[str, asyncio.Queue] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
         self._lock = asyncio.Lock()
 
@@ -245,12 +246,18 @@ class GatewayManager:
                 if run_id:
                     self.pending_run_id[msg_id] = run_id
             else:
+                err_msg = msg.get("error", {}).get("message", "chat.send failed")
+                q = self.pending_queues.get(msg_id)
+                if q is not None:
+                    q.put_nowait(f"Désolé, j'ai eu un problème technique. {err_msg[:50]}")
+                    q.put_nowait(None)
                 fut = self.pending.pop(msg_id, None)
                 if fut and not fut.done():
-                    fut.set_exception(Exception(msg.get("error", {}).get("message", "chat.send failed")))
+                    fut.set_exception(Exception(err_msg))
                 self.pending_text.pop(msg_id, None)
                 self.pending_run_id.pop(msg_id, None)
                 self.pending_resolved.pop(msg_id, None)
+                self.pending_queues.pop(msg_id, None)
             return
 
         # Agent events
@@ -258,16 +265,27 @@ class GatewayManager:
             ev = event
             run_id = payload.get("runId")
 
-            # Find matching request by runId or first unresolved
+            # Find matching request: prefer exact runId match, else most recent unresolved request
             req_id = None
-            for rid, fut in list(self.pending.items()):
-                stored_run = self.pending_run_id.get(rid)
-                if run_id and stored_run and run_id != stored_run:
-                    continue
-                if run_id and not stored_run:
-                    self.pending_run_id[rid] = run_id
-                req_id = rid
-                break
+            if run_id:
+                for rid, fut in reversed(list(self.pending.items())):
+                    if fut.done():
+                        continue
+                    stored_run = self.pending_run_id.get(rid)
+                    if stored_run == run_id:
+                        req_id = rid
+                        break
+            if req_id is None:
+                for rid, fut in reversed(list(self.pending.items())):
+                    if fut.done():
+                        continue
+                    stored_run = self.pending_run_id.get(rid)
+                    if run_id and stored_run and run_id != stored_run:
+                        continue
+                    if run_id and not stored_run:
+                        self.pending_run_id[rid] = run_id
+                    req_id = rid
+                    break
 
             if req_id is None:
                 return
@@ -305,12 +323,22 @@ class GatewayManager:
                 data = payload.get("data", {})
                 text_delta = data.get("text")
                 delta_text = data.get("deltaText")
+                prev_text = self.pending_text.get(req_id, "")
                 if delta_text is not None:
                     # v4 delta mode: accumulate
-                    self.pending_text[req_id] = self.pending_text.get(req_id, "") + delta_text
+                    new_text = prev_text + delta_text
+                    self.pending_text[req_id] = new_text
+                    emitted = delta_text
                 elif text_delta is not None:
-                    # v3 cumulative mode: replace
-                    self.pending_text[req_id] = text_delta
+                    # v3 cumulative mode: replace and compute delta
+                    new_text = text_delta
+                    self.pending_text[req_id] = new_text
+                    emitted = new_text[len(prev_text):] if new_text.startswith(prev_text) else new_text
+                else:
+                    emitted = ""
+                q = self.pending_queues.get(req_id)
+                if q is not None and emitted:
+                    q.put_nowait(emitted)
                 return
 
             # Tool call start → reset accumulated text (intermediate thinking)
@@ -319,12 +347,60 @@ class GatewayManager:
                 return
 
     def _resolve(self, req_id: str, text: str):
+        prev_text = self.pending_text.get(req_id, "")
+        q = self.pending_queues.pop(req_id, None)
+        if q is not None:
+            if text:
+                if not prev_text:
+                    q.put_nowait(text)
+                elif text.startswith(prev_text) and len(text) > len(prev_text):
+                    q.put_nowait(text[len(prev_text):])
+            q.put_nowait(None)
         fut = self.pending.pop(req_id, None)
         self.pending_text.pop(req_id, None)
         self.pending_run_id.pop(req_id, None)
         self.pending_resolved.pop(req_id, None)
         if fut and not fut.done():
             fut.set_result(text)
+
+    async def cancel_request(self, req_id: str):
+        fut = self.pending.pop(req_id, None)
+        self.pending_text.pop(req_id, None)
+        self.pending_run_id.pop(req_id, None)
+        self.pending_resolved.pop(req_id, None)
+        q = self.pending_queues.pop(req_id, None)
+        if q is not None:
+            q.put_nowait(None)
+        if fut and not fut.done():
+            fut.cancel()
+
+    async def start_stream(self, message: str, attachments: list = None) -> tuple[str, asyncio.Queue]:
+        """Send a message to the gateway and return (req_id, delta_queue) for live token streaming."""
+        if not self.connected or self.ws is None:
+            raise RuntimeError("Gateway not connected")
+
+        req_id = f"chat_{int(time.time() * 1000)}_{uuid.uuid4().hex[:6]}"
+        loop = asyncio.get_event_loop()
+        fut: asyncio.Future = loop.create_future()
+        q: asyncio.Queue = asyncio.Queue()
+        self.pending[req_id] = fut
+        self.pending_text[req_id] = ""
+        self.pending_queues[req_id] = q
+
+        params = {
+            "sessionKey": SESSION_KEY,
+            "message": message,
+            "idempotencyKey": req_id,
+        }
+        if attachments:
+            params["attachments"] = attachments
+
+        await self.ws.send(json.dumps({
+            "type": "req", "id": req_id, "method": "chat.send",
+            "params": params,
+        }))
+        log.info(f"[Gateway] → chat.send stream ({req_id[:20]}...)")
+        return req_id, q
 
     async def send(self, message: str, timeout: float = 120.0, attachments: list = None) -> str:
         """Send a message and wait for the complete agent response."""
@@ -538,6 +614,87 @@ def make_streaming_chunks(content: str, model: str = "gbot"):
     yield "data: [DONE]\n\n"
 
 
+async def stream_openclaw_chunks(message: str, attachments: list = None, model: str = "gbot"):
+    """Live SSE token streaming from the openclaw gateway (yields deltas as soon as generated)."""
+    chunk_id = f"chatcmpl-bridge-{int(time.time())}"
+    t0 = time.time()
+    first_token_logged = False
+    full_response = []
+
+    def _encode_delta(text_delta: str) -> str:
+        chunk = {
+            "id": chunk_id,
+            "object": "chat.completion.chunk",
+            "created": int(time.time()),
+            "model": model,
+            "choices": [{
+                "index": 0,
+                "delta": {"content": text_delta},
+                "finish_reason": None,
+            }],
+        }
+        return f"data: {json.dumps(chunk)}\n\n"
+
+    if _gateway is None or _gateway_loop is None:
+        yield _encode_delta("Désolé, le gateway n'est pas disponible.")
+    else:
+        if not _gateway.connected:
+            log.warning("[Bridge] Gateway not connected, waiting...")
+            for _ in range(20):
+                await asyncio.sleep(0.5)
+                if _gateway.connected:
+                    break
+        if not _gateway.connected:
+            yield _encode_delta("Désolé, je ne peux pas me connecter au serveur.")
+        else:
+            req_id = None
+            try:
+                fut = asyncio.run_coroutine_threadsafe(
+                    _gateway.start_stream(message, attachments=attachments),
+                    _gateway_loop,
+                )
+                req_id, q = await asyncio.wrap_future(fut)
+                deadline = time.time() + 120.0
+                while True:
+                    remaining = max(0.1, deadline - time.time())
+                    get_fut = asyncio.run_coroutine_threadsafe(q.get(), _gateway_loop)
+                    try:
+                        delta = await asyncio.wait_for(asyncio.wrap_future(get_fut), timeout=remaining)
+                    except asyncio.TimeoutError:
+                        log.warning(f"[Bridge] Stream timeout for {req_id}")
+                        break
+                    if delta is None:
+                        break
+                    if delta:
+                        if not first_token_logged:
+                            first_token_logged = True
+                            log.info(f"[Bridge] First token in {(time.time() - t0)*1000:.0f}ms: '{delta[:40]}'")
+                        full_response.append(delta)
+                        yield _encode_delta(delta)
+            except asyncio.CancelledError:
+                log.info(f"[Bridge] Client disconnected during stream ({req_id})")
+                if req_id:
+                    asyncio.run_coroutine_threadsafe(_gateway.cancel_request(req_id), _gateway_loop)
+                raise
+            except Exception as e:
+                log.error(f"[Bridge] Live stream failed: {e}")
+                if not full_response:
+                    yield _encode_delta("Désolé, j'ai eu un petit problème. Réessaie!")
+
+    joined = "".join(full_response)
+    log.info(f"Stream completed in {time.time() - t0:.2f}s: '{joined[:100]}...'")
+    final = {
+        "id": chunk_id,
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+    }
+    yield f"data: {json.dumps(final)}\n\n"
+    yield "data: [DONE]\n\n"
+
+
 @app.on_event("startup")
 async def startup():
     if LLM_MODE == "openclaw":
@@ -630,6 +787,16 @@ async def chat_completions(request: Request, api_key: str = Depends(verify_api_k
     if AVATAR_SAFE_MODE and last_user_message and is_message_blocked(last_user_message):
         return JSONResponse(content=make_openai_response(SAFE_MODE_BLOCKED_RESPONSE))
 
+    stream = body.get("stream", False)
+    if stream and LLM_MODE == "openclaw":
+        openclaw_message = last_user_message
+        if AVATAR_EMOTION_TAGS:
+            openclaw_message = f"{EMOTION_RULE}\n\n{last_user_message}"
+        return StreamingResponse(
+            stream_openclaw_chunks(openclaw_message, attachments=attachments),
+            media_type="text/event-stream",
+        )
+
     t0 = time.time()
     try:
         if LLM_MODE == "ollama":
@@ -645,7 +812,6 @@ async def chat_completions(request: Request, api_key: str = Depends(verify_api_k
 
     log.info(f"Response in {time.time() - t0:.1f}s: '{response_text[:100]}...'")
 
-    stream = body.get("stream", False)
     if stream:
         return StreamingResponse(
             make_streaming_chunks(response_text),

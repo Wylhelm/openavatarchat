@@ -10,44 +10,55 @@ EMOTION_MORPHS: Dict[str, Dict[str, float]] = {
     "surprise": {
         "browInnerUp": 0.7, "browOuterUpLeft": 0.4, "browOuterUpRight": 0.4,
         "eyeWideLeft": 0.6, "eyeWideRight": 0.6, "jawOpen": 0.25,
+        "mouthFunnel": 0.15,
     },
     "joie": {
         "mouthSmileLeft": 0.7, "mouthSmileRight": 0.7,
         "cheekSquintLeft": 0.5, "cheekSquintRight": 0.5,
         "eyeSquintLeft": 0.3, "eyeSquintRight": 0.3,
+        "mouthDimpleLeft": 0.25, "mouthDimpleRight": 0.25,
+        "browOuterUpLeft": 0.12, "browOuterUpRight": 0.12,
     },
     "tristesse": {
         "mouthFrownLeft": 0.6, "mouthFrownRight": 0.6,
         "browInnerUp": 0.5, "eyeLookDownLeft": 0.3, "eyeLookDownRight": 0.3,
+        "mouthShrugLower": 0.25, "eyeSquintLeft": 0.15, "eyeSquintRight": 0.15,
     },
     "colere": {
         "browDownLeft": 0.6, "browDownRight": 0.6,
         "mouthPressLeft": 0.4, "mouthPressRight": 0.4,
         "noseSneerLeft": 0.4, "noseSneerRight": 0.4,
+        "jawForward": 0.2, "eyeSquintLeft": 0.25, "eyeSquintRight": 0.25,
     },
     "reflexion": {
         "eyeLookUpLeft": 0.5, "eyeLookUpRight": 0.5,
         "browDownLeft": 0.3, "browDownRight": 0.3,
+        "mouthPucker": 0.15, "eyeSquintLeft": 0.15,
     },
     # Nuanced, often asymmetric expressions
     "amuse": {
         "mouthSmileLeft": 0.55, "mouthSmileRight": 0.2,
         "cheekSquintLeft": 0.35, "browOuterUpLeft": 0.2,
+        "mouthDimpleLeft": 0.3, "eyeSquintLeft": 0.2,
     },
     "doux": {
         "mouthSmileLeft": 0.25, "mouthSmileRight": 0.25,
         "eyeSquintLeft": 0.3, "eyeSquintRight": 0.3, "browInnerUp": 0.2,
+        "cheekSquintLeft": 0.2, "cheekSquintRight": 0.2,
     },
     "curieux": {
         "browOuterUpLeft": 0.6, "browInnerUp": 0.3, "eyeWideLeft": 0.25,
+        "eyeWideRight": 0.15, "jawForward": 0.1,
     },
     "sceptique": {
         "browOuterUpRight": 0.5, "browDownLeft": 0.35,
         "mouthPressLeft": 0.3, "mouthRight": 0.15,
+        "eyeSquintLeft": 0.25,
     },
     "inquiet": {
         "browInnerUp": 0.6, "eyeWideLeft": 0.2, "eyeWideRight": 0.2,
         "mouthStretchLeft": 0.2, "mouthStretchRight": 0.2,
+        "mouthShrugLower": 0.2,
     },
     NEUTRAL_EMOTION: {},
 }
@@ -57,6 +68,11 @@ MAX_EMOTION_INTENSITY = 1.0
 # Mouth and jaw channels are driven by lip-sync; emotion is damped there
 LIP_SYNC_CHANNEL_PREFIXES = ("mouth", "jaw")
 LIP_SYNC_DAMPING = 0.5
+
+# Standard ARKit 52 indices for blink and gaze/wide channels
+_BLINK_INDICES = (8, 9)  # eyeBlinkLeft, eyeBlinkRight
+_BLINK_SENSITIVE_INDICES = (10, 11, 12, 13, 14, 15, 16, 17, 20, 21)  # eyeLook*, eyeWide*
+_SOFT_KNEE_START = 0.75
 
 
 def parse_emotion(raw) -> Optional[Tuple[str, float]]:
@@ -130,8 +146,21 @@ def ramp_levels(start_level: float, frame_count: int, ramp_frames: float, fade_o
     return levels[:, np.newaxis], end_level
 
 
+def _soft_knee_clamp(values: np.ndarray) -> np.ndarray:
+    """Linear below _SOFT_KNEE_START, smoothly compressed toward 1.0 above it."""
+    clamped = np.maximum(values, 0.0)
+    over = np.maximum(clamped - _SOFT_KNEE_START, 0.0)
+    headroom = 1.0 - _SOFT_KNEE_START
+    compressed = np.where(
+        clamped > _SOFT_KNEE_START,
+        _SOFT_KNEE_START + headroom * (over / (over + headroom)),
+        clamped,
+    )
+    return np.clip(compressed, 0.0, 1.0)
+
+
 def blend_emotion(base_arkit: np.ndarray, emotion_vec: np.ndarray, weight=0.6) -> np.ndarray:
-    """Additive blend of emotion onto lip-sync morphs, clamped to [0, 1].
+    """Additive blend of emotion onto lip-sync morphs, with blink protection and soft-knee compression.
 
     base_arkit has the channel axis last ([N], [1, N] or [T, N]).
     weight is a scalar or a per-frame array of shape [T, 1].
@@ -139,5 +168,14 @@ def blend_emotion(base_arkit: np.ndarray, emotion_vec: np.ndarray, weight=0.6) -
     weight = np.asarray(weight, dtype=np.float32)
     if not np.any(weight > 0.0) or not np.any(emotion_vec):
         return base_arkit
-    blended = base_arkit + weight * emotion_vec
-    return np.clip(blended, 0.0, 1.0).astype(base_arkit.dtype, copy=False)
+    scaled_offset = weight * emotion_vec
+    if base_arkit.shape[-1] >= 22:
+        blink_level = np.maximum(
+            base_arkit[..., _BLINK_INDICES[0]],
+            base_arkit[..., _BLINK_INDICES[1]],
+        )
+        open_mask = np.clip(1.0 - blink_level, 0.0, 1.0)[..., np.newaxis]
+        scaled_offset = np.broadcast_to(scaled_offset, base_arkit.shape).copy()
+        scaled_offset[..., _BLINK_SENSITIVE_INDICES] *= open_mask
+    blended = base_arkit + scaled_offset
+    return _soft_knee_clamp(blended).astype(base_arkit.dtype, copy=False)

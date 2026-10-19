@@ -2,7 +2,9 @@
 
 import os
 import re
-from typing import Dict, Optional, cast
+import threading
+import time
+from typing import Dict, List, Optional, cast
 from loguru import logger
 from pydantic import BaseModel, Field
 from abc import ABC
@@ -14,8 +16,9 @@ from chat_engine.data_models.chat_data.chat_data_model import ChatData
 from chat_engine.data_models.chat_data_type import ChatDataType
 from chat_engine.contexts.session_context import SessionContext
 from chat_engine.data_models.runtime_data.data_bundle import DataBundle, DataBundleDefinition, DataBundleEntry
-from handlers.llm.openai_compatible.chat_history_manager import ChatHistory, HistoryMessage
+from handlers.llm.openai_compatible.chat_history_manager import ChatHistory, HistoryMessage, filter_text, name_dict
 from handlers.avatar.emotion.emotion_tag import EmotionTagStreamParser, strip_emotion_tags
+from engine_utils.media_utils import ImageUtils
 
 
 # Removed complex filtering - let the LLM and TTS work naturally
@@ -27,9 +30,32 @@ class LLMConfig(HandlerBaseConfigModel, BaseModel):
     api_key: str = Field(default=os.getenv("DASHSCOPE_API_KEY"))
     api_url: str = Field(default=None)
     enable_video_input: bool = Field(default=False)
+    video_input_on_demand: bool = Field(default=True)
     history_length: int = Field(default=20)
     temperature: float = Field(default=0.7)  # Lower temperature = more focused, less creative
     max_tokens: int = Field(default=150)  # Limit response length
+
+
+_VISUAL_QUERY_PATTERN = re.compile(
+    r"\b("
+    r"regarde\w*|voi[rst]\w*|vu\b|yeux|oeil|"
+    r"cam[eé]ra|webcam|photo|image|[eé]cran|"
+    r"montre\w*|tiens|tient|main\w*|doigt\w*|"
+    r"porte\w*|habill\w*|v[eê]tement\w*|t-?shirt|chemise|pull|veste|manteau|"
+    r"lunette\w*|casquette|chapeau|casque|cheveux|barbe|visage|t[eê]te|souri\w*|grimace|"
+    r"air\b|trouves|ressemble\w*|couleur\w*|objet\w*|"
+    r"derri[eè]re|devant|autour|fond|pi[eè]ce|chambre|bureau|salon|mur\w*|"
+    r"qu['\s]*est[- ]ce que c['\s]*est|qui est[- ]ce|"
+    r"look\w*|see\b|seeing|watch\w*|show\w*|holding|wearing|glasses|shirt|behind"
+    r")\b",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def should_include_video_frame(chat_text: str) -> bool:
+    if not chat_text:
+        return False
+    return bool(_VISUAL_QUERY_PATTERN.search(chat_text))
 
 
 class LLMContext(HandlerContext):
@@ -48,6 +74,11 @@ class LLMContext(HandlerContext):
         self.history = None
         self.enable_video_input = False
         self.shared_states = None
+        self.prewarmed_prefix: Optional[List[Dict]] = None
+        self.last_prewarm_seq: int = 0
+        self.last_conn_warm_ts: float = 0.0
+        self.prewarm_thread: Optional[threading.Thread] = None
+        self.prewarm_stop = threading.Event()
 
 
 class HandlerLLM(HandlerBase, ABC):
@@ -108,7 +139,59 @@ class HandlerLLM(HandlerBase, ABC):
         return context
     
     def start_context(self, session_context, handler_context):
-        pass
+        context = cast(LLMContext, handler_context)
+        if context.shared_states is not None and context.prewarm_thread is None:
+            context.prewarm_thread = threading.Thread(
+                target=self._prewarm_watcher,
+                args=(context,),
+                daemon=True,
+                name=f"llm-prewarm-{context.session_id[:6]}",
+            )
+            context.prewarm_thread.start()
+
+    @staticmethod
+    def _build_prefix_messages(context: LLMContext) -> List[Dict]:
+        prefix: List[Dict] = []
+        if context.system_prompt and context.system_prompt.get("content"):
+            prefix.append(context.system_prompt)
+        elif context.system_prompt is not None:
+            # Keep deterministic system message structure for KV cache stability
+            prefix.append(context.system_prompt)
+        if context.history is not None:
+            for msg in list(context.history.message_history):
+                prefix.append({
+                    "role": name_dict[msg.role],
+                    "content": filter_text(msg.content),
+                })
+        return prefix
+
+    def _prewarm_watcher(self, context: LLMContext):
+        """Watch for 500ms stable speech signal from VAD to pre-build prompt prefix and warm TCP connection."""
+        while not context.prewarm_stop.is_set():
+            shared = context.shared_states
+            if shared is None or not getattr(shared, "active", True):
+                time.sleep(0.05)
+                continue
+            seq = int(getattr(shared, "prewarm_seq", 0))
+            if seq != context.last_prewarm_seq:
+                context.last_prewarm_seq = seq
+                try:
+                    context.prewarmed_prefix = self._build_prefix_messages(context)
+                    now = time.monotonic()
+                    # Warm HTTP connection pool if idle for > 8s
+                    if context.client is not None and (now - context.last_conn_warm_ts) > 8.0:
+                        context.last_conn_warm_ts = now
+                        try:
+                            context.client._client.get("/models", timeout=2.0)
+                        except Exception:
+                            pass
+                    logger.info(
+                        f"LLM prewarmed for {getattr(shared, 'prewarm_speech_id', 'turn')} "
+                        f"({len(context.prewarmed_prefix)} prefix messages cached)"
+                    )
+                except Exception as e:
+                    logger.debug(f"LLM prewarm error: {e}")
+            time.sleep(0.02)
 
     def _remove_duplicate_endings(self, text):
         """Remove duplicate sentences, phrases, and words (aggressive cleanup for LLM looping)"""
@@ -234,18 +317,53 @@ class HandlerLLM(HandlerBase, ABC):
             return
         
         logger.info(f'LLM input: {chat_text}')
-        current_content = context.history.generate_next_messages(chat_text, 
-                                                                 [context.current_image] if context.current_image is not None else [])
+        video_on_demand = getattr(context.config, 'video_input_on_demand', True)
+        include_image = (
+            context.enable_video_input
+            and context.current_image is not None
+            and (not video_on_demand or should_include_video_frame(chat_text))
+        )
+        if include_image:
+            logger.info("Visual query detected: attaching webcam frame to LLM request")
+
+        prefix_messages = (
+            context.prewarmed_prefix
+            if context.prewarmed_prefix is not None
+            else self._build_prefix_messages(context)
+        )
+        context.prewarmed_prefix = None
+        if include_image and context.current_image is not None:
+            user_message = {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": filter_text(chat_text)},
+                    {"type": "image_url", "image_url": {"url": ImageUtils.format_image(context.current_image)}},
+                ],
+            }
+        else:
+            user_message = {
+                "role": "user",
+                "content": filter_text(chat_text),
+            }
+        request_messages = prefix_messages + [user_message]
+
         tag_parser = EmotionTagStreamParser()
+        gen_id = None
+        if context.shared_states is not None:
+            context.shared_states.active_speech_id = speech_id
+            context.shared_states.pipeline_generating = True
+            gen_id = getattr(context.shared_states, "turn_generation_id", None)
+
+        aborted = False
         try:
             # Get temperature and max_tokens from config if available
             temperature = getattr(context.config, 'temperature', 0.7)
             max_tokens = getattr(context.config, 'max_tokens', 200)
+            t_llm_start = time.monotonic()
+            context.last_conn_warm_ts = t_llm_start
             completion = context.client.chat.completions.create(
                 model=context.model_name,
-                messages=[
-                    context.system_prompt,
-                ] + current_content,
+                messages=request_messages,
                 stream=True,
                 temperature=temperature,  # Lower temperature = more focused, less creative
                 max_tokens=max_tokens,  # Limit response length
@@ -254,10 +372,24 @@ class HandlerLLM(HandlerBase, ABC):
             context.current_image = None
             context.input_texts = ''
             context.output_texts = ''
-            
+            first_token_marked = False
+
             for chunk in completion:
+                if context.shared_states is not None and hasattr(context.shared_states, "is_turn_aborted"):
+                    if context.shared_states.is_turn_aborted(speech_id, gen_id):
+                        logger.info(f"LLM stream aborted for {speech_id} due to user barge-in")
+                        aborted = True
+                        try:
+                            completion.close()
+                        except Exception:
+                            pass
+                        break
                 if (chunk and chunk.choices and chunk.choices[0] and chunk.choices[0].delta.content):
                     output_text = chunk.choices[0].delta.content
+                    if not first_token_marked and context.shared_states is not None:
+                        first_token_marked = True
+                        if hasattr(context.shared_states, "mark_llm_first_token"):
+                            context.shared_states.mark_llm_first_token(speech_id, t_start=t_llm_start)
                     # Ensure UTF-8 encoding is preserved
                     if isinstance(output_text, bytes):
                         output_text = output_text.decode('utf-8')
@@ -282,7 +414,7 @@ class HandlerLLM(HandlerBase, ABC):
                     # Log if we see "tre" which might indicate "être" was corrupted
                     if 'tre' in output_text.lower() and 'être' not in context.output_texts.lower():
                         logger.warning(f"Possible corruption: 'tre' detected in chunk: '{output_text}'")
-                    logger.info(output_text)
+                    logger.debug(output_text)
                     output = DataBundle(output_definition)
                     output.set_main_data(output_text)
                     output.add_meta("avatar_text_end", False)
@@ -290,19 +422,22 @@ class HandlerLLM(HandlerBase, ABC):
                     output.add_meta("avatar_emotion", tag_parser.emotion)
                     yield output
 
-            remaining_text, emotion_resolved = tag_parser.flush()
-            if emotion_resolved:
-                self._publish_emotion(context, speech_id, tag_parser.emotion)
-            if remaining_text:
-                context.output_texts += remaining_text
-                output = DataBundle(output_definition)
-                output.set_main_data(remaining_text)
-                output.add_meta("avatar_text_end", False)
-                output.add_meta("speech_id", speech_id)
-                output.add_meta("avatar_emotion", tag_parser.emotion)
-                yield output
+            if not aborted:
+                remaining_text, emotion_resolved = tag_parser.flush()
+                if emotion_resolved:
+                    self._publish_emotion(context, speech_id, tag_parser.emotion)
+                if remaining_text:
+                    context.output_texts += remaining_text
+                    output = DataBundle(output_definition)
+                    output.set_main_data(remaining_text)
+                    output.add_meta("avatar_text_end", False)
+                    output.add_meta("speech_id", speech_id)
+                    output.add_meta("avatar_emotion", tag_parser.emotion)
+                    yield output
 
             context.output_texts = strip_emotion_tags(context.output_texts)
+            if context.output_texts:
+                logger.info(f"LLM response ({speech_id}): {context.output_texts}")
 
             # Post-process the complete response to ensure proper French punctuation and accents
             if context.output_texts:
@@ -340,22 +475,27 @@ class HandlerLLM(HandlerBase, ABC):
                     context.output_texts += '.'
             
             context.history.add_message(HistoryMessage(role="human", content=chat_text), check_duplicates=False)
-            # Check for duplicates before adding avatar response to prevent looping
-            context.history.add_message(HistoryMessage(role="avatar", content=context.output_texts), check_duplicates=True)
+            if context.output_texts:
+                # Check for duplicates before adding avatar response to prevent looping
+                context.history.add_message(HistoryMessage(role="avatar", content=context.output_texts), check_duplicates=True)
         except Exception as e:
             logger.error(e)
-            if (isinstance(e, APIStatusError)):
-                response = e.body
-                if isinstance(response, dict) and "message" in response:
-                    response = f"{response['message']}"
-            output_text = response 
-            output = DataBundle(output_definition)
-            output.set_main_data(output_text)
-            output.add_meta("avatar_text_end", False)
-            output.add_meta("speech_id", speech_id)
-            yield output
+            if not aborted:
+                response = str(e)
+                if (isinstance(e, APIStatusError)):
+                    response = e.body
+                    if isinstance(response, dict) and "message" in response:
+                        response = f"{response['message']}"
+                output_text = str(response)
+                output = DataBundle(output_definition)
+                output.set_main_data(output_text)
+                output.add_meta("avatar_text_end", False)
+                output.add_meta("speech_id", speech_id)
+                yield output
         context.input_texts = ''
         context.output_texts = ''
+        if aborted:
+            return
         logger.info('avatar text end')
         end_output = DataBundle(output_definition)
         end_output.set_main_data('')
@@ -365,5 +505,6 @@ class HandlerLLM(HandlerBase, ABC):
         yield end_output
 
     def destroy_context(self, context: HandlerContext):
-        pass
+        context = cast(LLMContext, context)
+        context.prewarm_stop.set()
 
