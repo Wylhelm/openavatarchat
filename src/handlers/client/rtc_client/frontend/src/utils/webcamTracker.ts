@@ -368,11 +368,9 @@ export class WebcamFaceTracker {
       this.ctx.drawImage(video, 0, 0, SAMPLE_W, SAMPLE_H)
       const img = this.ctx.getImageData(0, 0, SAMPLE_W, SAMPLE_H)
       const res = computeSkinAndMotionCentroid(img.data, this.prevLuma, SAMPLE_W, SAMPLE_H)
-      // Once initial lock is acquired, only update target when coherent movement occurs;
-      // this guarantees zero drift or background attraction when the user sits still.
-      if (res.moving && res.confidence > 0.25) {
-        this.updateSmoothedTarget(now, res.x, res.y, res.confidence)
-      } else if (!this.hasInitialLock && res.confidence > 0.35) {
+      // Update target on coherent motion OR strong skin cluster presence (e.g. mobile
+      // where the user tilts/shifts the phone or moves smoothly across the camera frame).
+      if ((res.moving && res.confidence > 0.22) || res.confidence > 0.35) {
         this.updateSmoothedTarget(now, res.x, res.y, res.confidence)
       } else {
         this.checkHoldTimeout()

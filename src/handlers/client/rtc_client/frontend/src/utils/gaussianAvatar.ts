@@ -138,7 +138,7 @@ export class GaussianAvatar extends EventEmitter {
   start() {
     this.getData()
     this.render()
-    if (this._trackingVideoElement && !isMobileDevice()) {
+    if (this._trackingVideoElement) {
       this._faceTracker.start(this._trackingVideoElement)
     }
   }
