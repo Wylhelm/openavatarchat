@@ -3,6 +3,7 @@ import { Processor } from '@/helpers/processor'
 import { type WS } from '@/helpers/ws.js'
 import { EventTypes, PlayerEventTypes } from '@/interface/eventType'
 import { TYVoiceChatState } from '@/interface/voiceChat'
+import { noEchoCancel } from '@/utils/audioMode'
 import { AvatarLife, attachAvatarLife } from '@/utils/avatarLife'
 import { ensureBlob } from '@/utils/binaryUtils'
 import { WebcamFaceTracker } from '@/utils/webcamTracker'
@@ -137,7 +138,7 @@ export class GaussianAvatar extends EventEmitter {
   start() {
     this.getData()
     this.render()
-    if (this._trackingVideoElement) {
+    if (this._trackingVideoElement && !isMobileDevice()) {
       this._faceTracker.start(this._trackingVideoElement)
     }
   }
@@ -338,7 +339,7 @@ export class GaussianAvatar extends EventEmitter {
       this._ws.send(
         JSON.stringify({
           header: { name: EventTypes.StartSpeech },
-          payload: {},
+          payload: { no_aec: noEchoCancel },
         })
       )
     })

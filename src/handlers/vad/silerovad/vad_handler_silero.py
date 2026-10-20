@@ -37,6 +37,9 @@ class SpeakingStatus(enum.Enum):
     END = enum.auto()
 
 
+_HANN_512 = np.hanning(512).astype(np.float32)
+
+
 class HumanAudioVADContext(HandlerContext):
     def __init__(self, session_id: str):
         super().__init__(session_id)
@@ -59,6 +62,87 @@ class HumanAudioVADContext(HandlerContext):
         self.slice_context: Optional[SliceContext] = None
 
         self.speech_id: int = 0
+        self.echo_low_rms: float = 0.0004
+        self.echo_mid_rms: float = 0.0015
+        self.echo_mag_env: Optional[np.ndarray] = None
+        self.was_avatar_speaking: bool = False
+
+    def reset_echo_tracker(self):
+        self.echo_low_rms = 0.0004
+        self.echo_mid_rms = 0.0015
+        self.echo_mag_env = None
+
+    def filter_mobile_no_aec_clip(self, clip: np.ndarray) -> Tuple[np.ndarray, np.ndarray, bool]:
+        """
+        When mobile opens getUserMedia with echoCancellation=false & autoGainControl=false
+        (to avoid iOS VoiceProcessingIO WebAudio crackling), this method:
+        1) During avatar speech (before barge-in START): separates 270 Hz high-passed
+           phone speaker echo from real human vocal-cord fundamental energy (93-225 Hz).
+           Returns (vad_clip, history_clip, allow_voice).
+        2) Outside avatar speech (or once START is active): applies gentle software gain
+           for Silero VAD since raw mobile mic without AGC has low amplitude.
+        """
+        avatar_speaking = bool(getattr(self.shared_states, "avatar_speaking", False))
+        if avatar_speaking and not self.was_avatar_speaking:
+            self.reset_echo_tracker()
+        self.was_avatar_speaking = avatar_speaking
+
+        rms = float(np.sqrt(np.mean(np.square(clip)))) if clip.size > 0 else 0.0
+        if not avatar_speaking or self.speaking_status == SpeakingStatus.START:
+            if rms >= 0.0010:
+                vad_clip = np.clip(clip * 6.0, -1.0, 1.0).astype(np.float32)
+            else:
+                vad_clip = clip
+            return vad_clip, clip, True
+
+        if clip.size != 512:
+            zeros = np.zeros_like(clip)
+            return zeros, zeros, False
+
+        spec = np.fft.rfft(clip * _HANN_512)
+        mag = np.abs(spec).astype(np.float32)
+        # Vocal-cord fundamental band: 93.75..187.5 Hz (bins 3..6) + 0.8 * 218.75 Hz (bin 7)
+        # Mobile speaker output is 6th-order Butterworth high-passed at 310 Hz in player.ts.
+        low_energy = float(np.sum(np.square(mag[3:7])) + 0.64 * float(mag[7] ** 2))
+        low_rms = math.sqrt(low_energy / (512.0 * 192.0))
+        # Phone speaker echo band: 312.5..3593.75 Hz (bins 10..115)
+        mid_energy = float(np.sum(np.square(mag[10:116])))
+        mid_rms = math.sqrt(mid_energy / (512.0 * 192.0))
+        low_mid_ratio = low_rms / (mid_rms + 1e-6)
+
+        # Pure speaker echo frame (high-passed at 310 Hz on the client player)
+        if low_mid_ratio < 0.058 and mid_rms > 0.0004:
+            self.echo_low_rms = 0.85 * self.echo_low_rms + 0.15 * low_rms
+            self.echo_mid_rms = max(0.92 * self.echo_mid_rms, 0.80 * self.echo_mid_rms + 0.20 * mid_rms)
+            if self.echo_mag_env is None:
+                self.echo_mag_env = mag.copy()
+            else:
+                self.echo_mag_env = np.maximum(
+                    0.90 * self.echo_mag_env, 0.75 * self.echo_mag_env + 0.25 * mag
+                )
+
+        user_voice_detected = (
+            (rms >= 0.0016 and low_rms >= max(0.00075, self.echo_low_rms * 2.4) and low_mid_ratio >= 0.070)
+            or (mid_rms < 0.0015 and rms >= 0.0022 and low_rms >= 0.00070)
+            or (rms >= max(0.010, self.echo_mid_rms * 2.8) and low_rms >= max(0.0009, self.echo_low_rms * 1.8))
+        )
+
+        if not user_voice_detected:
+            zeros = np.zeros_like(clip)
+            return zeros, zeros, False
+
+        if self.echo_mag_env is not None:
+            clean_mag = mag.copy()
+            clean_mag[9:130] = np.maximum(
+                0.15 * mag[9:130], mag[9:130] - 1.15 * self.echo_mag_env[9:130]
+            )
+            clean_spec = spec * (clean_mag / (mag + 1e-8))
+            clean_clip = np.fft.irfft(clean_spec, n=512).astype(np.float32)
+        else:
+            clean_clip = clip
+
+        vad_clip = np.clip(clean_clip * 6.0, -1.0, 1.0).astype(np.float32)
+        return vad_clip, clean_clip, True
 
     def reset(self):
         self.audio_history.clear()
@@ -166,7 +250,12 @@ class HumanAudioVADContext(HandlerContext):
             and self._is_avatar_active()
         ):
             rms = float(np.sqrt(np.mean(np.square(clip)))) if clip.size > 0 else 0.0
-            if rms < self.config.barge_in_min_rms:
+            min_rms = (
+                min(self.config.barge_in_min_rms, 0.0015)
+                if bool(getattr(self.shared_states, "client_no_aec", False))
+                else self.config.barge_in_min_rms
+            )
+            if rms < min_rms:
                 is_voice = False
 
         if is_voice:
@@ -289,8 +378,16 @@ class HandlerAudioVAD(HandlerBase, ABC):
 
         for clip in slice_data(context.slice_context, audio):
             head_sample_id = context.slice_context.get_last_slice_start_index()
-            speech_prob = self._inference(context, clip)
-            audio_clip, extra_args = context.update_status(speech_prob, clip, timestamp=head_sample_id)
+            client_no_aec = bool(getattr(context.shared_states, "client_no_aec", False))
+            if client_no_aec:
+                vad_clip, history_clip, allow_voice = context.filter_mobile_no_aec_clip(clip)
+                speech_prob = self._inference(context, vad_clip)
+                if not allow_voice:
+                    speech_prob = 0.0
+            else:
+                history_clip = clip
+                speech_prob = self._inference(context, clip)
+            audio_clip, extra_args = context.update_status(speech_prob, history_clip, timestamp=head_sample_id)
             human_speech_start = extra_args.get("human_speech_start", False)
             human_speech_end = extra_args.get("human_speech_end", False)
             speech_prewarm = extra_args.get("speech_prewarm", False)

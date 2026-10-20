@@ -38,7 +38,9 @@ export async function getStream(
     video:
       typeof video === 'object'
         ? { ...video, ...video_fallback_constraints }
-        : video,
+        : video && typeof video_fallback_constraints === 'object'
+          ? video_fallback_constraints
+          : video,
     audio:
       typeof audio === 'object'
         ? { ...audio, ...audio_fallback_constraints }

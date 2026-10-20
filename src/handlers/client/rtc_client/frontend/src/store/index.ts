@@ -16,7 +16,7 @@ import { message } from 'ant-design-vue'
 import { defineStore } from 'pinia'
 import { useVisionStore } from './vision'
 
-if (noEchoCancel || isCoarsePointer) setPlayerOutputBoost(2.5)
+if (noEchoCancel) setPlayerOutputBoost(2.5)
 
 const track_constraints = {
   video: {
@@ -124,8 +124,6 @@ export const useVideoChatStore = defineStore('videoChatStore', {
   actions: {
     async accessDevice() {
       try {
-        const visionState = useVisionStore()
-        const node = visionState.localVideoRef
         this.micMuted = false
         this.cameraOff = false
         this.volumeMuted = false
@@ -133,37 +131,19 @@ export const useVideoChatStore = defineStore('videoChatStore', {
           message.error('无法获取媒体设备，请确保用localhost访问或https协议访问')
           return
         }
-        await navigator.mediaDevices
-          .getUserMedia({
-            audio: true,
-          })
-          .catch(() => {
-            console.log('no audio permission')
-            this.hasMicPermission = false
-          })
-        await navigator.mediaDevices
-          .getUserMedia({
-            video: true,
-          })
-          .catch(() => {
-            console.log('no video permission')
-            this.hasCameraPermission = false
-          })
-        const devices = await getDevices()
+        const devices = await getDevices().catch(() => [] as MediaDeviceInfo[])
         this.devices = devices
-        console.log('🚀 ~ access_webcam ~ devices:', devices)
         const videoDeviceId =
           this.selectedVideoDevice &&
-          devices.some((device) => device.deviceId === this.selectedVideoDevice?.deviceId)
+          devices.some((device) => device.deviceId && device.deviceId === this.selectedVideoDevice?.deviceId)
             ? this.selectedVideoDevice.deviceId
             : ''
         const audioDeviceId =
           this.selectedAudioDevice &&
-          devices.some((device) => device.deviceId === this.selectedAudioDevice?.deviceId)
+          devices.some((device) => device.deviceId && device.deviceId === this.selectedAudioDevice?.deviceId)
             ? this.selectedAudioDevice.deviceId
             : ''
-        console.log(videoDeviceId, audioDeviceId, ' access web device')
-        this.fillStream(audioDeviceId, videoDeviceId)
+        await this.fillStream(audioDeviceId, videoDeviceId)
         this.webcamAccessed = true
       } catch (err: any) {
         console.log(err)
@@ -255,70 +235,80 @@ export const useVideoChatStore = defineStore('videoChatStore', {
       this.availableAudioDevices = setAvailableDevices(devices, 'audioinput')
     },
     async fillStream(audioDeviceId: string, videoDeviceId: string) {
-      const { devices } = this
       const visionState = useVisionStore()
       const node = visionState.localVideoRef
-      this.hasMic =
-        devices.some((device) => {
-          return device.kind === 'audioinput' && device.deviceId
-        }) && this.hasMicPermission
-      this.hasCamera =
-        devices.some((device) => device.kind === 'videoinput' && device.deviceId) &&
-        this.hasCameraPermission
-      await getStream(
+      if (this.stream) {
+        this.stream.getTracks().forEach((t) => t.stop())
+        this.stream = null
+      }
+      const wantAudio =
         audioDeviceId && audioDeviceId !== 'default'
           ? { deviceId: { exact: audioDeviceId } }
-          : this.hasMic,
+          : this.hasMicPermission
+      const wantVideo =
         videoDeviceId && videoDeviceId !== 'default'
           ? { deviceId: { exact: videoDeviceId } }
-          : this.hasCamera,
-        this.trackConstraints
-      )
-        .then(async (local_stream) => {
-          console.log('local_stream', local_stream)
-          this.stream = local_stream
-          this.updateAvailableDevices()
-        })
-        .then(() => {
-          const used_devices = this.stream!.getTracks().map(
-            (track) => track.getSettings()?.deviceId
-          )
-          used_devices.forEach((device_id) => {
-            const used_device = devices.find((device) => device.deviceId === device_id)
-            if (used_device && used_device?.kind.includes('video')) {
-              this.selectedVideoDevice = used_device
-            } else if (used_device && used_device?.kind.includes('audio')) {
-              this.selectedAudioDevice = used_device
-            }
-          })
-          !this.selectedVideoDevice && (this.selectedVideoDevice = this.availableVideoDevices[0])
-        })
-        .catch((e) => {
-          console.error('image.no_webcam_support', e)
-        })
-        .finally(() => {
-          console.log(this.stream)
-          if (!this.stream) {
-            this.stream = new MediaStream()
-          }
-          console.log(this.stream.getTracks())
+          : this.hasCameraPermission
 
-          if (!this.stream.getTracks().find((item) => item.kind === 'audio')) {
-            this.stream.addTrack(createSimulatedAudioTrack())
+      let local_stream: MediaStream | null = null
+      try {
+        local_stream = await getStream(wantAudio, wantVideo, this.trackConstraints)
+      } catch {
+        // Fallback: try audio-only (e.g. desktop without webcam), then video-only
+        try {
+          local_stream = await getStream(wantAudio, false, this.trackConstraints)
+          this.hasCameraPermission = false
+        } catch {
+          this.hasMicPermission = false
+          try {
+            local_stream = await getStream(false, wantVideo, this.trackConstraints)
+          } catch (e) {
+            this.hasCameraPermission = false
+            console.error('image.no_webcam_support', e)
           }
-          if (!this.stream.getTracks().find((item) => item.kind === 'video')) {
-            this.stream.addTrack(createSimulatedVideoTrack())
-          }
-          console.log(this.hasCamera, this.hasMic)
-          this.webcamAccessed = true
-          this.localStream = this.stream
-          if (node) {
-            node.srcObject = this.localStream
-            node.muted = true
-            node?.play()
-            this.localAvatarRenderer?.setTrackingVideoElement?.(node)
+        }
+      }
+
+      if (local_stream) {
+        this.stream = local_stream
+        const devices = await getDevices().catch(() => [] as MediaDeviceInfo[])
+        this.devices = devices
+        await this.updateAvailableDevices()
+        this.hasMic =
+          this.stream.getAudioTracks().length > 0 && this.hasMicPermission
+        this.hasCamera =
+          this.stream.getVideoTracks().length > 0 && this.hasCameraPermission
+        const used_devices = this.stream
+          .getTracks()
+          .map((track) => track.getSettings()?.deviceId)
+        used_devices.forEach((device_id) => {
+          const used_device = devices.find((device) => device.deviceId === device_id)
+          if (used_device && used_device?.kind.includes('video')) {
+            this.selectedVideoDevice = used_device
+          } else if (used_device && used_device?.kind.includes('audio')) {
+            this.selectedAudioDevice = used_device
           }
         })
+        !this.selectedVideoDevice && (this.selectedVideoDevice = this.availableVideoDevices[0])
+      }
+
+      if (!this.stream) {
+        this.stream = new MediaStream()
+      }
+      if (!this.stream.getTracks().find((item) => item.kind === 'audio')) {
+        this.stream.addTrack(createSimulatedAudioTrack())
+      }
+      if (!this.stream.getTracks().find((item) => item.kind === 'video')) {
+        this.stream.addTrack(createSimulatedVideoTrack())
+      }
+      this.webcamAccessed = true
+      this.localStream = this.stream
+      if (node) {
+        node.srcObject = this.localStream
+        node.muted = true
+        node?.play()
+        this.localAvatarRenderer?.setTrackingVideoElement?.(node)
+      }
     },
     armDisconnectGrace() {
       if (disconnectGraceTimer !== null) return
@@ -415,6 +405,12 @@ export const useVideoChatStore = defineStore('videoChatStore', {
       )
       ws.on(WsEventTypes.WS_OPEN, () => {
         console.log('socket opened')
+        ws.send(
+          JSON.stringify({
+            header: { name: 'ClientAudioMode' },
+            payload: { no_aec: noEchoCancel },
+          })
+        )
       })
       ws.on(WsEventTypes.WS_CLOSE, () => {
         console.log('socket closed')
@@ -443,14 +439,6 @@ export const useVideoChatStore = defineStore('videoChatStore', {
           }
         },
       })
-      if (noEchoCancel) {
-        gaussianAvatar.on(EventTypes.StateChanged, (state: TYVoiceChatState) => {
-          const open = state !== TYVoiceChatState.Responding && !this.micMuted
-          this.stream?.getAudioTracks().forEach((track) => {
-            track.enabled = open
-          })
-        })
-      }
       gaussianAvatar.start()
       return gaussianAvatar
     },

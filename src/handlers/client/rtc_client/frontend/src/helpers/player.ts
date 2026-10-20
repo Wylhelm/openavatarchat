@@ -34,10 +34,15 @@ interface IScheduledChunk {
   end: number
 }
 
-// Speech arrives in streaming clauses over the network. A 150ms prebuffer
-// starts playback 250ms faster than 400ms while still absorbing WebSocket jitter.
-const PREBUFFER_SECONDS = 0.15
-const REBUFFER_SECONDS = 0.12
+// Speech arrives in streaming clauses over the network. A 150ms prebuffer on desktop
+// (350ms on mobile) starts playback fast while absorbing WebSocket jitter on mobile.
+const isCoarsePointer =
+  typeof window !== 'undefined' &&
+  typeof window.matchMedia === 'function' &&
+  window.matchMedia('(pointer: coarse)').matches
+
+const PREBUFFER_SECONDS = isCoarsePointer ? 0.4 : 0.15
+const REBUFFER_SECONDS = isCoarsePointer ? 0.25 : 0.12
 const FADE_SECONDS = 0.006
 
 const sharedContexts = new Map<number, AudioContext>()
@@ -45,7 +50,10 @@ const sharedOutputs = new WeakMap<AudioContext, AudioNode>()
 let outputBoost = 1
 
 // Out of the phone-call audio path the voice plays at media level, which is
-// quieter. Boost it, with a limiter in front so peaks don't clip.
+// quieter. Boost it, with a 4th-order 270 Hz Butterworth high-pass filter
+// (removing sub-240 Hz energy so the server VAD can separate human vocal-cord
+// fundamental 90-230 Hz from speaker echo without hardware AEC) and a limiter
+// so peaks never clip.
 export function setPlayerOutputBoost(gain: number) {
   outputBoost = gain
 }
@@ -55,17 +63,45 @@ function getOutput(ctx: AudioContext) {
   if (existing) return existing
   let output: AudioNode = ctx.destination
   if (outputBoost !== 1) {
+    const hp1 = ctx.createBiquadFilter()
+    hp1.type = 'highpass'
+    hp1.frequency.value = 310
+    hp1.Q.value = 0.5176
+
+    const hp2 = ctx.createBiquadFilter()
+    hp2.type = 'highpass'
+    hp2.frequency.value = 310
+    hp2.Q.value = 0.7071
+
+    const hp3 = ctx.createBiquadFilter()
+    hp3.type = 'highpass'
+    hp3.frequency.value = 310
+    hp3.Q.value = 1.9319
+
     const limiter = ctx.createDynamicsCompressor()
     limiter.threshold.value = -20
     limiter.knee.value = 6
     limiter.ratio.value = 6
     limiter.attack.value = 0.003
     limiter.release.value = 0.2
+
     const makeup = ctx.createGain()
     makeup.gain.value = outputBoost
+
+    const ceiling = ctx.createDynamicsCompressor()
+    ceiling.threshold.value = -1.5
+    ceiling.knee.value = 2
+    ceiling.ratio.value = 20
+    ceiling.attack.value = 0.001
+    ceiling.release.value = 0.1
+
+    hp1.connect(hp2)
+    hp2.connect(hp3)
+    hp3.connect(limiter)
     limiter.connect(makeup)
-    makeup.connect(ctx.destination)
-    output = limiter
+    makeup.connect(ceiling)
+    ceiling.connect(ctx.destination)
+    output = hp1
   }
   sharedOutputs.set(ctx, output)
   return output
@@ -78,8 +114,6 @@ function getAudioContext(sampleRate: number) {
     window.AudioContext ||
     (window as unknown as { webkitAudioContext: typeof AudioContext })
       .webkitAudioContext
-  // The avatar renderer keeps a phone busy; the default interactive latency
-  // leaves the audio device so little slack that it crackles under that load.
   let ctx: AudioContext
   try {
     ctx = new AudioContextCtor({ sampleRate, latencyHint: 'playback' })

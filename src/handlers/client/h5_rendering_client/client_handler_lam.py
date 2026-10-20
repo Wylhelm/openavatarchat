@@ -121,6 +121,8 @@ class LamClientSessionDelegate(RtcClientSessionDelegate):
                 if chat_data.type == ChatDataType.AVATAR_MOTION_DATA:
                     msg = serializer.serialize(chat_data.data)
                     await websocket.send_bytes(msg)
+                    if self.shared_states is not None:
+                        self.shared_states.avatar_speaking = True
                     now = time.monotonic()
                     arkit = chat_data.data.get_main_data()
                     clip_dur = (arkit.shape[0] / 30.0) if (arkit is not None and hasattr(arkit, "shape") and len(arkit.shape) > 0) else 0.5
@@ -167,11 +169,19 @@ class LamClientSessionDelegate(RtcClientSessionDelegate):
                     )
                     self.emit_signal(signal)
                 elif msg_type == "StartSpeech":
+                    payload = msg.get("payload") or {}
+                    if self.shared_states is not None and "no_aec" in payload:
+                        self.shared_states.client_no_aec = bool(payload.get("no_aec", False))
                     signal = ChatSignal(
                         source_type=ChatSignalSourceType.CLIENT,
                         type=ChatSignalType.BEGIN,
                     )
                     self.emit_signal(signal)
+                elif msg_type == "ClientAudioMode":
+                    payload = msg.get("payload") or {}
+                    if self.shared_states is not None and "no_aec" in payload:
+                        self.shared_states.client_no_aec = bool(payload.get("no_aec", False))
+                        logger.info(f"Client audio mode updated: client_no_aec={self.shared_states.client_no_aec}")
             except Exception as e:
                 logger.error(f"Error occurs while processing client message: {e}")
                 continue

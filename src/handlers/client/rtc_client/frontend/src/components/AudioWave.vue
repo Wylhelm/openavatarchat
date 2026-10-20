@@ -25,73 +25,49 @@ const props = withDefaults(
 );
 const emit = defineEmits([]);
 
-let audioContext: AudioContext;
-let analyser: AnalyserNode;
-let dataArray: Uint8Array;
-let animationId: number;
+let animationId: number | null = null;
+let phase = 0;
 
 const containerWidth = computed(() => {
   return props.icon ? '128px' : `calc((var(--boxSize) + var(--gutter)) * ${props.numBars} + 80px)`;
 });
 
+function stopVisualization() {
+  if (animationId !== null) {
+    cancelAnimationFrame(animationId);
+    animationId = null;
+  }
+}
+
 watch(
   () => props.streamState,
   () => {
-    console.log(111111);
-    if (props.streamState === 'open') setupAudioContext();
+    stopVisualization();
+    if (props.streamState === 'open') {
+      updateVisualization();
+    }
   },
   { immediate: true },
 );
 
 onUnmounted(() => {
-  if (animationId) {
-    cancelAnimationFrame(animationId);
-  }
-  if (audioContext) {
-    audioContext.close();
-  }
+  stopVisualization();
 });
 
-function setupAudioContext() {
-  // @ts-ignore
-  audioContext = new (window.AudioContext || window.webkitAudioContext)();
-  analyser = audioContext.createAnalyser();
-  const streamSource = props.audioSourceCallback();
-  if (!streamSource) return;
-  const source = audioContext.createMediaStreamSource(streamSource);
-
-  source.connect(analyser);
-
-  analyser.fftSize = 64;
-  analyser.smoothingTimeConstant = 0.8;
-  dataArray = new Uint8Array(analyser.frequencyBinCount);
-
-  updateVisualization();
-}
-
+// Animate wave bars without creating a second AudioContext or calling
+// createMediaStreamSource(localStream), which causes iOS WebKit CoreAudio
+// clock-domain conflicts and crackling when WebRTC mic capture is active.
 function updateVisualization() {
-  analyser.getByteFrequencyData(dataArray);
-
-  // Update bars
+  phase += 0.12;
   const bars = document.querySelectorAll('.gradio-webrtc-waveContainer .gradio-webrtc-box');
   for (let i = 0; i < bars.length; i++) {
-    const barHeight = dataArray[transformIndex(i)] / 255;
     const bar = bars[i] as HTMLDivElement;
-    bar.style.transform = `scaleY(${Math.max(0.1, barHeight)})`;
+    const wave = 0.22 + 0.18 * Math.sin(phase + i * 0.45);
+    bar.style.transform = `scaleY(${wave.toFixed(2)})`;
     bar.style.background = props.waveColor;
     bar.style.opacity = '0.5';
   }
-
   animationId = requestAnimationFrame(updateVisualization);
-}
-
-// 声波高度从两侧向中间收拢
-function transformIndex(index: number): number {
-  const mapping = [0, 2, 4, 6, 8, 10, 12, 14, 15, 13, 11, 9, 7, 5, 3, 1];
-  if (index < 0 || index >= mapping.length) {
-    throw new Error('Index must be between 0 and 15');
-  }
-  return mapping[index];
 }
 </script>
 

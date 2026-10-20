@@ -193,16 +193,17 @@ class HandlerAvatarLAM(HandlerBase):
         audio_segments = queue.Queue()
         for audio_segment in slice_data(context.input_slice_context, audio.squeeze()):
             audio_segments.put_nowait(audio_segment)
-        # Flush any buffered tail on the very first TTS clause (>=0.12s) so the avatar
-        # starts speaking the whole first clause immediately without waiting for chunk #2.
-        if not speech_end and not context.first_motion_emitted:
+        # Flush any buffered tail on the very first TTS clause ONLY when the entire first
+        # clause was shorter than 1.0s (so audio_segments is still empty). When audio_segments
+        # already has >= 1.0s slice(s), keep the remainder in input_slice_context so it
+        # concatenates seamlessly with chunk #2 without emitting a micro-slice seam.
+        if not speech_end and not context.first_motion_emitted and audio_segments.empty():
             rem = context.input_slice_context.last_remainder
             min_first_samples = round(context.config.audio_sample_rate * context.config.first_slice_min_seconds)
-            if rem is not None and (rem.shape[0] >= min_first_samples or not audio_segments.empty()):
-                if rem.shape[0] >= round(context.config.audio_sample_rate * 0.12):
-                    flushed_first = context.input_slice_context.flush()
-                    if flushed_first is not None:
-                        audio_segments.put_nowait(flushed_first)
+            if rem is not None and rem.shape[0] >= min_first_samples:
+                flushed_first = context.input_slice_context.flush()
+                if flushed_first is not None:
+                    audio_segments.put_nowait(flushed_first)
         if speech_end:
             end_segment = context.input_slice_context.flush()
             if end_segment is not None:

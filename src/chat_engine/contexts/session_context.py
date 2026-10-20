@@ -102,6 +102,7 @@ class SharedStates:
     human_speaking: bool = False
     avatar_speaking: bool = False
     pipeline_generating: bool = False
+    client_no_aec: bool = False
     turn_generation_id: int = 0
     barge_in_seq: int = 0
     prewarm_speech_id: Optional[str] = None
