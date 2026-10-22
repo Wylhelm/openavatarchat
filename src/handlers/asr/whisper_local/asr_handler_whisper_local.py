@@ -53,10 +53,12 @@ def _normalize_audio_chunk(audio: np.ndarray) -> np.ndarray:
         return audio.astype(np.float32) / 32768.0
     if audio.dtype == np.float32:
         max_val = float(np.abs(audio).max())
-        return audio / 32768.0 if max_val > 1.0 else audio
+        if max_val > 2.0:
+            return audio / 32768.0
+        return np.clip(audio, -1.0, 1.0)
     out = audio.astype(np.float32)
     max_val = float(np.abs(out).max())
-    return out / max_val if max_val > 1.0 else out
+    return out / max_val if max_val > 2.0 else np.clip(out, -1.0, 1.0)
 
 
 def _merge_transcript_parts(parts: List[str]) -> str:

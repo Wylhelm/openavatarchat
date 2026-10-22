@@ -483,6 +483,8 @@ class HandlerTTS(HandlerBase, ABC):
     def filter_text(self, text):
         if not text:
             return text
+        from handlers.avatar.emotion.emotion_tag import strip_emotion_tags
+        text = strip_emotion_tags(text)
         # Convert em-dashes, en-dashes, and ellipses to commas so prosodic pauses are preserved
         text = re.sub(r"\s*[—–…]+\s*", ", ", text)
         text = re.sub(r"[«»""]", '"', text)

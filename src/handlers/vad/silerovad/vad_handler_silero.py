@@ -394,7 +394,7 @@ class HandlerAudioVAD(HandlerBase, ABC):
             timestamp = inputs.timestamp
 
         if audio.dtype != np.float32:
-            audio = audio.astype(np.float32) / 32767
+            audio = audio.astype(np.float32) / 32768.0
 
         context.slice_context.update_start_id(timestamp[0], force_update=False)
 

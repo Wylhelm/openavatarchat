@@ -46,6 +46,7 @@ class AvatarLAMContext(HandlerContext):
         self.first_motion_emitted: bool = False
         self.shared_states = None
         self.emotion_speech_id: Optional[str] = None
+        self.last_emotion_name: Optional[str] = None
         self.emotion_vec: Optional[np.ndarray] = None
         self.emotion_level: float = 0.0
         self.micro_state = MicroExpressionState()
@@ -262,14 +263,16 @@ class HandlerAvatarLAM(HandlerBase):
     def _update_emotion(self, context: AvatarLAMContext, speech_id: Optional[str]):
         if speech_id != context.emotion_speech_id:
             context.emotion_speech_id = speech_id
+            context.last_emotion_name = None
             context.emotion_vec = None
             context.emotion_level = 0.0
             context.micro_state = MicroExpressionState()
-        if context.emotion_vec is not None or context.shared_states is None:
+        if context.shared_states is None:
             return
         emotion = context.shared_states.get_avatar_emotion(speech_id)
-        if emotion is None:
+        if emotion is None or emotion == context.last_emotion_name:
             return
+        context.last_emotion_name = emotion
         context.emotion_vec = emotion_to_arkit(emotion, self.channel_index)
         logger.info(f"LAM applying emotion '{emotion}' to speech_id={speech_id}")
 
@@ -298,6 +301,7 @@ class HandlerAvatarLAM(HandlerBase):
         if context.shared_states is not None and speech_id != context.session_id:
             context.shared_states.pop_avatar_emotion(speech_id)
         context.emotion_speech_id = None
+        context.last_emotion_name = None
         context.emotion_vec = None
         context.emotion_level = 0.0
         context.micro_state = MicroExpressionState()
