@@ -321,26 +321,6 @@ class GatewayManager:
                 self._resolve(req_id, f"Désolé, j'ai eu un problème technique. {err_msg[:50]}")
                 return
 
-            # chat delta state (protocol v3/v4 chat stream)
-            if ev == "chat" and payload.get("state") == "delta":
-                content = payload.get("message", {}).get("content", [])
-                snap = "".join(c.get("text", "") for c in content if isinstance(c, dict))
-                delta_str = payload.get("delta") or payload.get("deltaText")
-                prev_text = self.pending_text.get(req_id, "")
-                if delta_str:
-                    new_text = prev_text + delta_str
-                    self.pending_text[req_id] = new_text
-                    emitted = delta_str
-                elif snap:
-                    self.pending_text[req_id] = snap
-                    emitted = snap[len(prev_text):] if snap.startswith(prev_text) else ""
-                else:
-                    emitted = ""
-                q = self.pending_queues.get(req_id)
-                if q is not None and emitted:
-                    q.put_nowait(emitted)
-                return
-
             # chat final state → resolve immediately
             if ev == "chat" and payload.get("state") == "final":
                 content = payload.get("message", {}).get("content", [])
@@ -358,11 +338,13 @@ class GatewayManager:
                 return
 
             # Accumulate assistant text (cumulative from gateway)
-            # Protocol v4: deltaText/delta carries the delta, message.content/text is the cumulative snapshot
+            # Note: Do NOT also consume `ev == "chat" and state == "delta"` because the gateway
+            # emits BOTH `agent/assistant` and `chat/delta` for the same tokens, which would
+            # interleave and duplicate every sentence!
             if ev == "agent" and payload.get("stream") == "assistant":
                 data = payload.get("data", {})
                 text_delta = data.get("text")
-                delta_text = data.get("deltaText") if data.get("deltaText") is not None else data.get("delta")
+                delta_text = data.get("deltaText")
                 prev_text = self.pending_text.get(req_id, "")
                 if delta_text is not None:
                     # v4 delta mode: accumulate
