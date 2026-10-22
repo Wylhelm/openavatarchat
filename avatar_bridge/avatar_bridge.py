@@ -346,16 +346,21 @@ class GatewayManager:
                 text_delta = data.get("text")
                 delta_text = data.get("deltaText")
                 prev_text = self.pending_text.get(req_id, "")
-                if delta_text is not None:
-                    # v4 delta mode: accumulate
+                # Prefer cumulative `text` snapshot when present so there is zero risk of
+                # double-appending if the gateway sends cumulative text alongside deltaText.
+                if text_delta is not None and (not prev_text or text_delta.startswith(prev_text)):
+                    new_text = text_delta
+                    self.pending_text[req_id] = new_text
+                    emitted = new_text[len(prev_text):]
+                elif delta_text is not None:
                     new_text = prev_text + delta_text
                     self.pending_text[req_id] = new_text
                     emitted = delta_text
                 elif text_delta is not None:
-                    # v3 cumulative mode: replace and compute delta
+                    # Cumulative snapshot that didn't start with prev_text (e.g. after tool reset)
                     new_text = text_delta
                     self.pending_text[req_id] = new_text
-                    emitted = new_text[len(prev_text):] if new_text.startswith(prev_text) else new_text
+                    emitted = new_text
                 else:
                     emitted = ""
                 q = self.pending_queues.get(req_id)

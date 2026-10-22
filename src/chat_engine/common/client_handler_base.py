@@ -71,8 +71,9 @@ class ClientHandlerDelegate:
     def stop_session(self, session_id: str):
         engine = self.engine_ref()
         assert engine is not None
-        engine.stop_session(session_id)
-        self.session_delegates.pop(session_id)
+        if session_id in self.session_delegates:
+            engine.stop_session(session_id)
+            self.session_delegates.pop(session_id, None)
 
     def find_session_delegate(self, session_id: str):
         return self.session_delegates.get(session_id)

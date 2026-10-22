@@ -70,6 +70,16 @@ class RtcStream(AsyncAudioVideoStreamHandler):
             session_id = kwargs.get("webrtc_id", None)
             if session_id is None:
                 session_id = uuid.uuid4().hex
+            # Shut down any previous zombie sessions so an old mobile/desktop tab or
+            # half-open WebRTC peer connection never processes mic audio in parallel!
+            for old_id, old_stream in list(self.streams.items()):
+                if old_id != session_id:
+                    logger.info(f"Closing previous session {old_id} before starting {session_id}")
+                    try:
+                        old_stream.shutdown()
+                    except Exception as e:
+                        logger.warning(f"Error closing previous session {old_id}: {e}")
+                    self.streams.pop(old_id, None)
             new_stream = RtcStream(
                 session_id,
                 expected_layout=self.expected_layout,
@@ -286,3 +296,5 @@ class RtcStream(AsyncAudioVideoStreamHandler):
         self.client_session_delegate = None
         if factory.client_handler_delegate is not None:
             factory.client_handler_delegate.stop_session(self.session_id)
+        if hasattr(factory, "streams"):
+            factory.streams.pop(self.session_id, None)
