@@ -186,7 +186,7 @@ class RtcStream(AsyncAudioVideoStreamHandler):
             self.chat_channel = channel
             
             async def process_chat_history():
-                role = None
+                last_turn_key = None
                 chat_id = None
                 last_human_speaking = False
                 last_emotion_seq = 0
@@ -227,11 +227,25 @@ class RtcStream(AsyncAudioVideoStreamHandler):
                     chat_data = await self.client_session_delegate.get_data(EngineChannelType.TEXT)
                     if chat_data is None or chat_data.data is None:
                         continue
+                    msg_text = chat_data.data.get_main_data()
+                    if not msg_text:
+                        continue
+                    speech_id = chat_data.data.get_meta("speech_id")
+                    if (
+                        chat_data.type == ChatDataType.AVATAR_TEXT
+                        and self.client_session_delegate is not None
+                        and self.client_session_delegate.shared_states is not None
+                        and hasattr(self.client_session_delegate.shared_states, "is_turn_aborted")
+                        and self.client_session_delegate.shared_states.is_turn_aborted(speech_id)
+                    ):
+                        continue
                     logger.debug(f"Got chat data {str(chat_data)}")
                     current_role = 'human' if chat_data.type == ChatDataType.HUMAN_TEXT else 'avatar'
-                    chat_id = uuid.uuid4().hex if current_role != role else chat_id
-                    role = current_role
-                    self.chat_channel.send(json.dumps({'type': 'chat', 'message': chat_data.data.get_main_data(), 
+                    turn_key = (current_role, speech_id)
+                    if turn_key != last_turn_key or chat_id is None:
+                        chat_id = uuid.uuid4().hex
+                        last_turn_key = turn_key
+                    self.chat_channel.send(json.dumps({'type': 'chat', 'message': msg_text, 
                                                         'id': chat_id, 'role': current_role}))  
             asyncio.create_task(process_chat_history())
                 

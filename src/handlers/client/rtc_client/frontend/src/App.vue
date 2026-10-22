@@ -37,18 +37,15 @@ function toggleTheme() {
 
 async function newSession() {
   try {
-    // Call bridge API to reset session
-    // Bridge runs on the LLM API URL (port 9000)
-    const bridgeUrl = 'http://10.0.0.253:9000'
-    const res = await fetch(`${bridgeUrl}/api/new-session`, { method: 'POST' })
-    if (res.ok) {
-      // Reload the page to get a fresh WebRTC connection
-      window.location.reload()
+    // Call same-origin proxy first (works over HTTPS and mobile without Mixed Content blocks)
+    const res = await fetch('/openavatarchat/new-session', { method: 'POST' })
+    if (!res.ok) {
+      await fetch('http://10.0.0.253:9000/api/new-session', { method: 'POST' })
     }
   } catch (e) {
     console.error('New session failed:', e)
-    window.location.reload()
   }
+  window.location.reload()
 }
 
 onMounted(() => {

@@ -223,6 +223,20 @@ class ClientHandlerRtc(ClientHandlerBase):
             }
             return JSONResponse(status_code=200, content=config)
 
+        @fastapi.post('/openavatarchat/new-session')
+        @fastapi.get('/openavatarchat/new-session')
+        async def proxy_new_session():
+            import urllib.request
+            bridge_url = "http://10.0.0.253:9000/api/new-session"
+            try:
+                req = urllib.request.Request(bridge_url, method="POST")
+                with urllib.request.urlopen(req, timeout=5.0) as resp:
+                    body = json.loads(resp.read().decode("utf-8"))
+                    return JSONResponse(status_code=200, content=body)
+            except Exception as exc:
+                logger.warning(f"Failed to reset bridge session via {bridge_url}: {exc}")
+                return JSONResponse(status_code=502, content={"ok": False, "error": str(exc)})
+
         frontend_path = Path(DirectoryInfo.get_src_dir() + '/handlers/client/rtc_client/frontend/dist')
         if frontend_path.exists():
             logger.info(f"Serving frontend from {frontend_path}")

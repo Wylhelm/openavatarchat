@@ -387,8 +387,6 @@ class ChatSession:
                         except Exception:
                             break
         for ch_type, out_queue in self.session_context.output_queues.items():
-            if ch_type == EngineChannelType.TEXT:
-                continue
             while not out_queue.empty():
                 try:
                     out_queue.get_nowait()

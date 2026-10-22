@@ -46,7 +46,30 @@ GATEWAY_URL = os.environ.get("OPENCLAW_GATEWAY_URL", "ws://localhost:18789")
 OPENCLAW_CONFIG_PATH = os.environ.get("OPENCLAW_CONFIG_PATH", os.path.expanduser("~/.openclaw/openclaw.json"))
 OPENCLAW_DIR = os.path.dirname(OPENCLAW_CONFIG_PATH)
 IDENTITY_PATH = os.path.join(OPENCLAW_DIR, "agents/avatar/device-identity.json")
-SESSION_KEY = "agent:avatar:main"
+SESSION_KEY_FILE = os.path.join(OPENCLAW_DIR, "agents/avatar/current_session_key.txt")
+
+
+def _load_or_init_session_key() -> str:
+    """Load persisted clean session key, or create a fresh timestamped key so restarts
+    never fall back into the legacy polluted 'agent:avatar:main' transcript."""
+    try:
+        if os.path.exists(SESSION_KEY_FILE):
+            saved = open(SESSION_KEY_FILE).read().strip()
+            if saved and saved != "agent:avatar:main":
+                return saved
+    except Exception:
+        pass
+    fresh = f"agent:avatar:main-{int(time.time())}"
+    try:
+        os.makedirs(os.path.dirname(SESSION_KEY_FILE), exist_ok=True)
+        with open(SESSION_KEY_FILE, "w") as f:
+            f.write(fresh)
+    except Exception:
+        pass
+    return fresh
+
+
+SESSION_KEY = _load_or_init_session_key()
 
 VOICE_ELABORATION_RULE = """RÈGLE DE CONVERSATION & ÉLABORATION: Ton audio est streamé dès ta première phrase. Commence par une phrase courte (5 à 12 mots), puis développe spontanément en 4 à 6 phrases fluides et naturelles dès que le sujet s'y prête (sans listes ni markdown). Réponds court (1-2 phrases) uniquement pour une salutation ou confirmation simple."""
 
@@ -337,32 +360,35 @@ class GatewayManager:
                     )
                 return
 
-            # Accumulate assistant text (cumulative from gateway)
+            # Accumulate assistant text (live token deltas from gateway)
             # Note: Do NOT also consume `ev == "chat" and state == "delta"` because the gateway
             # emits BOTH `agent/assistant` and `chat/delta` for the same tokens, which would
             # interleave and duplicate every sentence!
             if ev == "agent" and payload.get("stream") == "assistant":
                 data = payload.get("data", {})
                 text_delta = data.get("text")
-                delta_text = data.get("deltaText")
+                delta_text = data.get("deltaText") if data.get("deltaText") is not None else data.get("delta")
                 prev_text = self.pending_text.get(req_id, "")
-                # Prefer cumulative `text` snapshot when present so there is zero risk of
-                # double-appending if the gateway sends cumulative text alongside deltaText.
-                if text_delta is not None and (not prev_text or text_delta.startswith(prev_text)):
-                    new_text = text_delta
-                    self.pending_text[req_id] = new_text
-                    emitted = new_text[len(prev_text):]
-                elif delta_text is not None:
-                    new_text = prev_text + delta_text
-                    self.pending_text[req_id] = new_text
+                emitted = ""
+                if isinstance(text_delta, str) and text_delta:
+                    if not prev_text:
+                        self.pending_text[req_id] = text_delta
+                        emitted = text_delta
+                    elif text_delta.startswith(prev_text) and len(text_delta) > len(prev_text):
+                        # Cumulative snapshot that grew prev_text
+                        emitted = text_delta[len(prev_text):]
+                        self.pending_text[req_id] = text_delta
+                    elif isinstance(delta_text, str) and delta_text:
+                        # Incremental delta in delta/deltaText
+                        self.pending_text[req_id] = prev_text + delta_text
+                        emitted = delta_text
+                    elif text_delta != prev_text:
+                        # Cumulative snapshot after tool reset
+                        self.pending_text[req_id] = text_delta
+                        emitted = text_delta
+                elif isinstance(delta_text, str) and delta_text:
+                    self.pending_text[req_id] = prev_text + delta_text
                     emitted = delta_text
-                elif text_delta is not None:
-                    # Cumulative snapshot that didn't start with prev_text (e.g. after tool reset)
-                    new_text = text_delta
-                    self.pending_text[req_id] = new_text
-                    emitted = new_text
-                else:
-                    emitted = ""
                 q = self.pending_queues.get(req_id)
                 if q is not None and emitted:
                     q.put_nowait(emitted)
@@ -390,7 +416,9 @@ class GatewayManager:
             q.put_nowait(None)
         fut = self.pending.pop(req_id, None)
         self.pending_text.pop(req_id, None)
-        self.pending_run_id.pop(req_id, None)
+        done_run_id = self.pending_run_id.pop(req_id, None)
+        if done_run_id:
+            self.cancelled_run_ids.add(done_run_id)
         self.pending_resolved.pop(req_id, None)
         if fut and not fut.done():
             fut.set_result(text)
@@ -407,11 +435,29 @@ class GatewayManager:
             q.put_nowait(None)
         if fut and not fut.done():
             fut.cancel()
+        if self.connected and self.ws is not None:
+            abort_params = {"sessionKey": SESSION_KEY}
+            if old_run_id:
+                abort_params["runId"] = old_run_id
+            try:
+                await self.ws.send(json.dumps({
+                    "type": "req",
+                    "id": f"abort_{uuid.uuid4().hex[:6]}",
+                    "method": "chat.abort",
+                    "params": abort_params,
+                }))
+                log.info(f"[Gateway] → chat.abort ({req_id[:20]}..., runId={old_run_id})")
+            except Exception as e:
+                log.debug(f"[Gateway] chat.abort send error: {e}")
 
     async def start_stream(self, message: str, attachments: list = None) -> tuple[str, asyncio.Queue]:
         """Send a message to the gateway and return (req_id, delta_queue) for live token streaming."""
         if not self.connected or self.ws is None:
             raise RuntimeError("Gateway not connected")
+
+        # Cancel any still-pending request so runs never queue behind each other in OpenClaw
+        for stale_rid in list(self.pending.keys()):
+            await self.cancel_request(stale_rid)
 
         req_id = f"chat_{int(time.time() * 1000)}_{uuid.uuid4().hex[:6]}"
         loop = asyncio.get_event_loop()
@@ -748,6 +794,12 @@ async def new_session():
     """Reset the avatar agent session — purge transcript and use a fresh session key."""
     global SESSION_KEY
     import glob
+    if _gateway is not None and _gateway_loop is not None:
+        for stale_rid in list(_gateway.pending.keys()):
+            try:
+                asyncio.run_coroutine_threadsafe(_gateway.cancel_request(stale_rid), _gateway_loop)
+            except Exception:
+                pass
     sessions_dir = os.path.join(OPENCLAW_DIR, "agents/avatar/sessions")
     # Delete transcript files
     for f in glob.glob(os.path.join(sessions_dir, "*.jsonl")):
@@ -761,8 +813,14 @@ async def new_session():
     if os.path.exists(sessions_json):
         with open(sessions_json, "w") as f:
             json.dump({}, f)
-    # New unique session key
+    # New unique session key (persisted so restarts don't revert to agent:avatar:main)
     SESSION_KEY = f"agent:avatar:main-{int(time.time())}"
+    try:
+        os.makedirs(os.path.dirname(SESSION_KEY_FILE), exist_ok=True)
+        with open(SESSION_KEY_FILE, "w") as f:
+            f.write(SESSION_KEY)
+    except Exception as e:
+        log.warning(f"[NewSession] Error saving session key: {e}")
     log.info(f"[NewSession] New session key: {SESSION_KEY}")
     return {"ok": True, "session": SESSION_KEY}
 
