@@ -35,9 +35,7 @@ class LamClientSessionDelegate(RtcClientSessionDelegate):
         self.quit = asyncio.Event()
         self._expected_speech_end_ts: float = 0.0
         self._speech_end_sent: bool = False
-
-    async def _ws_output_task(self, websocket: WebSocket):
-        logger.warning(f"Send task started on {websocket}")
+        self._ws_session_seq: int = 0
         serializer = MotionDataSerializer()
         serializer.register_audio_data("avatar_audio")
         serializer.register_data(
@@ -46,10 +44,18 @@ class LamClientSessionDelegate(RtcClientSessionDelegate):
             "float32"
         )
         self.motion_data_serializer = serializer
+
+    async def _ws_output_task(self, websocket: WebSocket, ws_seq: int):
+        logger.warning(f"Send task started on {websocket} (seq={ws_seq})")
+        serializer = self.motion_data_serializer
         welcome_message_sent = False
         last_send = time.monotonic()
         last_barge_in_seq = getattr(self.shared_states, "barge_in_seq", 0) if self.shared_states is not None else 0
-        while not self.quit.is_set() and websocket.client_state != WebSocketState.DISCONNECTED:
+        while (
+            not self.quit.is_set()
+            and self._ws_session_seq == ws_seq
+            and websocket.client_state != WebSocketState.DISCONNECTED
+        ):
             current_barge_in = getattr(self.shared_states, "barge_in_seq", 0) if self.shared_states is not None else 0
             if current_barge_in != last_barge_in_seq:
                 last_barge_in_seq = current_barge_in
@@ -142,8 +148,12 @@ class LamClientSessionDelegate(RtcClientSessionDelegate):
                 logger.info(f"Motion websocket send failed: {e}")
                 break
 
-    async def _ws_input_task(self, websocket: WebSocket):
-        while not self.quit.is_set() and websocket.client_state != WebSocketState.DISCONNECTED:
+    async def _ws_input_task(self, websocket: WebSocket, ws_seq: int):
+        while (
+            not self.quit.is_set()
+            and self._ws_session_seq == ws_seq
+            and websocket.client_state != WebSocketState.DISCONNECTED
+        ):
             try:
                 raw_msg = await asyncio.wait_for(websocket.receive_text(), timeout=0.1)
             except asyncio.TimeoutError:
@@ -204,10 +214,12 @@ class LamClientSessionDelegate(RtcClientSessionDelegate):
                 self.shared_states.trigger_barge_in()
 
     async def serve_websocket(self, websocket: WebSocket):
-        logger.warning(f"Ready to serve websocket {websocket}")
+        self._ws_session_seq += 1
+        ws_seq = self._ws_session_seq
+        logger.warning(f"Ready to serve websocket {websocket} (seq={ws_seq})")
         logger.warning(f"send task created")
-        receive_task = asyncio.create_task(self._ws_input_task(websocket))
-        send_task = asyncio.create_task(self._ws_output_task(websocket))
+        receive_task = asyncio.create_task(self._ws_input_task(websocket, ws_seq))
+        send_task = asyncio.create_task(self._ws_output_task(websocket, ws_seq))
         done, pending = await asyncio.wait(
             [receive_task, send_task],
             return_when=asyncio.FIRST_COMPLETED,
@@ -215,7 +227,14 @@ class LamClientSessionDelegate(RtcClientSessionDelegate):
         for task in pending:
             task.cancel()
         await asyncio.gather(*pending, return_exceptions=True)
-        if self.shared_states is not None and not getattr(self.shared_states, "pipeline_generating", False):
+        # Only reset avatar_speaking if no newer WS replaced this one AND expected playback time has passed
+        now = time.monotonic()
+        if (
+            self._ws_session_seq == ws_seq
+            and self.shared_states is not None
+            and not getattr(self.shared_states, "pipeline_generating", False)
+            and now >= self._expected_speech_end_ts
+        ):
             self.shared_states.avatar_speaking = False
             self.shared_states.enable_vad = True
 

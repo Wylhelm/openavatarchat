@@ -321,13 +321,14 @@ export class GaussianAvatar extends EventEmitter {
     this._exited = true
     this._faceTracker.stop()
     this._clearThinkingTimer()
+    this._ws?.stop?.()
+    this._processor?.clear()
     const renderer = this._renderer
     this._renderer = null
     renderer?.dispose()
     this.curState = TYVoiceChatState.Idle
     this._downloadPercent = 0
     this._loadPercent = 0
-    this._processor?.clear()
     this.removeAllListeners()
   }
   private _bindEventTypes() {

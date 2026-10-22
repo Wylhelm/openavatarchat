@@ -193,17 +193,16 @@ class HandlerAvatarLAM(HandlerBase):
         audio_segments = queue.Queue()
         for audio_segment in slice_data(context.input_slice_context, audio.squeeze()):
             audio_segments.put_nowait(audio_segment)
-        # Flush any buffered tail on the very first TTS clause ONLY when the entire first
-        # clause was shorter than 1.0s (so audio_segments is still empty). When audio_segments
-        # already has >= 1.0s slice(s), keep the remainder in input_slice_context so it
-        # concatenates seamlessly with chunk #2 without emitting a micro-slice seam.
-        if not speech_end and not context.first_motion_emitted and audio_segments.empty():
-            rem = context.input_slice_context.last_remainder
-            min_first_samples = round(context.config.audio_sample_rate * context.config.first_slice_min_seconds)
-            if rem is not None and rem.shape[0] >= min_first_samples:
-                flushed_first = context.input_slice_context.flush()
-                if flushed_first is not None:
-                    audio_segments.put_nowait(flushed_first)
+        # Flush the remainder of each TTS sentence ONLY if it is at least 0.25s (6000 samples).
+        # Tiny remainders (<0.25s) lack wav2vec2 context and cause WebAudio micro-slice seams;
+        # keeping them in input_slice_context merges them seamlessly with the next TTS clause
+        # (or flushes them cleanly when speech_end=True arrives).
+        rem = context.input_slice_context.last_remainder
+        min_tail_samples = round(context.config.audio_sample_rate * max(0.25, context.config.first_slice_min_seconds))
+        if rem is not None and rem.shape[0] >= min_tail_samples:
+            flushed_tail = context.input_slice_context.flush()
+            if flushed_tail is not None and flushed_tail.shape[0] > 0:
+                audio_segments.put_nowait(flushed_tail)
         if speech_end:
             end_segment = context.input_slice_context.flush()
             if end_segment is not None:

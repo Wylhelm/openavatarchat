@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import json
 import asyncio
@@ -32,8 +33,8 @@ if not AVATAR_BRIDGE_API_KEY:
     sys.exit(1)
 
 AVATAR_SAFE_MODE = os.environ.get("AVATAR_SAFE_MODE", "true").lower() in ("true", "1", "yes")
-# The openclaw gateway never receives SYSTEM_PROMPT, so the emotion rule is sent with each message
-AVATAR_EMOTION_TAGS = os.environ.get("AVATAR_EMOTION_TAGS", "true").lower() in ("true", "1", "yes")
+# OpenClaw loads emotion, conversation, and voice rules once from AGENTS.md / SOUL.md.
+# They are not repeated on each turn. SYSTEM_PROMPT still carries them for the Ollama fallback.
 PORT = int(os.environ.get("PORT", "9000"))
 
 # LLM backend: "openclaw" (full G-Bot context) or "ollama" (fast but no tools)
@@ -47,12 +48,9 @@ OPENCLAW_DIR = os.path.dirname(OPENCLAW_CONFIG_PATH)
 IDENTITY_PATH = os.path.join(OPENCLAW_DIR, "agents/avatar/device-identity.json")
 SESSION_KEY = "agent:avatar:main"
 
-VOICE_ELABORATION_RULE = """RÈGLE DE CONVERSATION & ÉLABORATION: Ton audio est désormais streamé en direct dès ta première phrase : parler plus longtemps NE ralentit PAS ton délai de réponse initial.
-- Commence toujours par une première phrase courte et naturelle (5 à 12 mots) pour démarrer la parole immédiatement.
-- Ensuite, NE TE BRIDE PLUS à de courtes phrases : dès que le sujet s'y prête (discussion sur un projet, robotique, résumé de courriels, idée de repas, question ouverte, réflexion, brainstorm ou explication), ÉLABORE spontanément en 4 à 7 phrases riches et naturelles. Développe tes idées, donne des détails concrets, propose des pistes ou des comparaisons pertinentes sans attendre que Guillaume doive te relancer à chaque fois.
-- Garde uniquement des réponses courtes (1-2 phrases) pour les simples confirmations rapides (« oui », « d'accord », salutations). Toujours en style parlé fluide, sans listes à puces ni markdown."""
+VOICE_ELABORATION_RULE = """RÈGLE DE CONVERSATION & ÉLABORATION: Ton audio est streamé dès ta première phrase. Commence par une phrase courte (5 à 12 mots), puis développe spontanément en 4 à 6 phrases fluides et naturelles dès que le sujet s'y prête (sans listes ni markdown). Réponds court (1-2 phrases) uniquement pour une salutation ou confirmation simple."""
 
-EMOTION_RULE = """RÈGLE ÉMOTION: Préfixe TOUJOURS ta réponse par un tag d'émotion entre crochets, suivi du texte. Format exact : [EMOTION] texte ou [EMOTION:INTENSITÉ] texte, INTENSITÉ entre 0.2 et 1 (défaut 1). EMOTION ∈ {neutre, joie, surprise, tristesse, colere, reflexion, amuse, doux, curieux, sceptique, inquiet}. Nuances : amuse = demi-sourire en coin, doux = regard adouci et chaleureux, curieux = un sourcil levé, sceptique = moue dubitative, inquiet = sourcils froncés d'inquiétude. Préfère les nuances et les intensités modérées aux émotions franches : une information ordinaire n'est pas une surprise. Choisis l'émotion selon le ton de TA réponse ET ce que tu vois à la caméra. Exemples : [joie] Bonjour Guillaume, ça me fait plaisir de te voir ! [amuse:0.6] Ah, tu essaies encore de me piéger ? [curieux] Qu'est-ce que tu tiens dans la main ? [doux:0.5] Prends le temps qu'il faut. [neutre] Il fait 21 degrés dans ta chambre. Le tag est retiré avant la synthèse vocale, il sert uniquement à animer ton visage.
+EMOTION_RULE = """RÈGLE ÉMOTION: Préfixe TOUJOURS ta réponse par [EMOTION] ou [EMOTION:INTENSITÉ] (0.2 à 1), EMOTION ∈ {neutre, joie, surprise, tristesse, colere, reflexion, amuse, doux, curieux, sceptique, inquiet}. Choisis l'émotion selon le ton de ta réponse (et l'image jointe uniquement si une image est fournie dans ce message ; n'appelle aucun outil pour chercher la caméra).
 
 """ + VOICE_ELABORATION_RULE
 
@@ -81,6 +79,18 @@ RÈGLE DE SÉCURITÉ: Tu ne peux PAS exécuter d'actions (envoyer emails, allume
 RÈGLE VOCALE: Réponds TOUJOURS en français sauf si Guillaume parle en anglais. Commence par une phrase d'attaque courte, puis élabore et développe tes réponses (4 à 7 phrases) dès que le sujet est intéressant ou pertinent.
 
 """ + EMOTION_RULE
+
+# Trailing vocal-style note the avatar handler may still append. Drop it so the
+# OpenClaw transcript stores the question only.
+_STYLE_VOCAL_SUFFIX = re.compile(r"\s*\[Style vocal:[^\]]*\]\s*$")
+
+
+def openclaw_turn_message(text: str) -> str:
+    """Question only. Standing rules live in the agent bootstrap, not in this turn."""
+    if not text:
+        return ""
+    return _STYLE_VOCAL_SUFFIX.sub("", text).strip()
+
 
 BLOCKED_PATTERNS = [
     "rm ", "rm -", "mv ", "docker rm", "docker stop", "sudo ",
@@ -311,6 +321,26 @@ class GatewayManager:
                 self._resolve(req_id, f"Désolé, j'ai eu un problème technique. {err_msg[:50]}")
                 return
 
+            # chat delta state (protocol v3/v4 chat stream)
+            if ev == "chat" and payload.get("state") == "delta":
+                content = payload.get("message", {}).get("content", [])
+                snap = "".join(c.get("text", "") for c in content if isinstance(c, dict))
+                delta_str = payload.get("delta") or payload.get("deltaText")
+                prev_text = self.pending_text.get(req_id, "")
+                if delta_str:
+                    new_text = prev_text + delta_str
+                    self.pending_text[req_id] = new_text
+                    emitted = delta_str
+                elif snap:
+                    self.pending_text[req_id] = snap
+                    emitted = snap[len(prev_text):] if snap.startswith(prev_text) else ""
+                else:
+                    emitted = ""
+                q = self.pending_queues.get(req_id)
+                if q is not None and emitted:
+                    q.put_nowait(emitted)
+                return
+
             # chat final state → resolve immediately
             if ev == "chat" and payload.get("state") == "final":
                 content = payload.get("message", {}).get("content", [])
@@ -328,11 +358,11 @@ class GatewayManager:
                 return
 
             # Accumulate assistant text (cumulative from gateway)
-            # Protocol v4: deltaText carries the delta, message.content is the cumulative snapshot
+            # Protocol v4: deltaText/delta carries the delta, message.content/text is the cumulative snapshot
             if ev == "agent" and payload.get("stream") == "assistant":
                 data = payload.get("data", {})
                 text_delta = data.get("text")
-                delta_text = data.get("deltaText")
+                delta_text = data.get("deltaText") if data.get("deltaText") is not None else data.get("delta")
                 prev_text = self.pending_text.get(req_id, "")
                 if delta_text is not None:
                     # v4 delta mode: accumulate
@@ -806,11 +836,8 @@ async def chat_completions(request: Request, api_key: str = Depends(verify_api_k
 
     stream = body.get("stream", False)
     if stream and LLM_MODE == "openclaw":
-        openclaw_message = last_user_message
-        if AVATAR_EMOTION_TAGS:
-            openclaw_message = f"{EMOTION_RULE}\n\n{last_user_message}"
         return StreamingResponse(
-            stream_openclaw_chunks(openclaw_message, attachments=attachments),
+            stream_openclaw_chunks(openclaw_turn_message(last_user_message), attachments=attachments),
             media_type="text/event-stream",
         )
 
@@ -819,10 +846,9 @@ async def chat_completions(request: Request, api_key: str = Depends(verify_api_k
         if LLM_MODE == "ollama":
             response_text = call_ollama(messages)
         else:
-            openclaw_message = last_user_message
-            if AVATAR_EMOTION_TAGS:
-                openclaw_message = f"{EMOTION_RULE}\n\n{last_user_message}"
-            response_text = call_openclaw(openclaw_message, attachments=attachments)
+            response_text = call_openclaw(
+                openclaw_turn_message(last_user_message), attachments=attachments
+            )
     except Exception as e:
         log.error(f"LLM call failed: {e}")
         response_text = "Désolé, j'ai eu un petit problème. Réessaie!"

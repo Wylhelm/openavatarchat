@@ -86,20 +86,20 @@ const BLINK_DURATION = 0.16
 // Head rest pose is in centimetres under a 0.01 armature scale, so 0.55 local
 // is about 5.5 mm in the scene. Nod angles are radians on the bone's local X
 // (chin down). Listening is a clearer nod than thinking.
-const BREATH_AMP = 0.55
-const DRIFT_X = 0.032
-const DRIFT_Y = 0.026
-const DRIFT_Z = 0.018
+const BREATH_AMP = 0.52
+const DRIFT_X = 0.018
+const DRIFT_Y = 0.0 // Zero horizontal yaw oscillation at rest so she never appears to shake her head "no"
+const DRIFT_Z = 0.01
 const NOD_LISTEN = 0.14
 const NOD_THINK = 0.08
-const SPEECH_NOD_GAIN = 0.095
-const SPEECH_YAW_GAIN = 0.045
-const SPEECH_ROLL_GAIN = 0.025
+const SPEECH_NOD_GAIN = 0.085
+const SPEECH_YAW_GAIN = 0.012
+const SPEECH_ROLL_GAIN = 0.014
 const TRACK_HEAD_YAW_MAX = 0.28 // ~16 deg max horizontal head turn toward user
 const TRACK_HEAD_PITCH_MAX = 0.11 // ~6.3 deg max vertical head tilt toward user
-const TRACK_HEAD_ROLL_MAX = 0.04 // subtle empathetic head tilt when looking sideways
-const TRACK_GAZE_X_MAX = 0.48
-const TRACK_GAZE_Y_MAX = 0.32
+const TRACK_HEAD_ROLL_MAX = 0.035 // subtle empathetic head tilt when looking sideways
+const TRACK_GAZE_X_MAX = 0.50
+const TRACK_GAZE_Y_MAX = 0.34
 
 export type AvatarEmotion =
   | 'neutral'
@@ -358,6 +358,8 @@ export class AvatarLife {
   private saccadeOffsetY = 0
   private userTargetX = 0
   private userTargetY = 0
+  private smoothTargetX = 0
+  private smoothTargetY = 0
   private userTracked = false
   private userSmile = 0
   private moodPitch = 0
@@ -481,19 +483,22 @@ export class AvatarLife {
       0.3
     )
 
+    // Two-stage exponential low-pass filter on the 12.5 Hz webcam target so 60 fps head
+    // and eye motion is critically damped (C1-continuous velocity, zero step-response jerks).
+    const rawTargetX = this.userTracked ? this.userTargetX : 0
+    const rawTargetY = this.userTracked ? this.userTargetY : 0
+    this.smoothTargetX = follow(this.smoothTargetX, rawTargetX, dt, 0.22)
+    this.smoothTargetY = follow(this.smoothTargetY, rawTargetY, dt, 0.25)
+
     this.advanceGaze(dt, mode)
 
     // Smoothly follow the user's webcam position with natural head/neck inertia
-    const headTrackScale = mode === 'think' ? 0.55 : 1.0
-    const targetHeadX = this.userTracked
-      ? this.userTargetX * TRACK_HEAD_YAW_MAX * headTrackScale
-      : 0
-    const deadzoneY = Math.abs(this.userTargetY) < 0.04 ? 0 : this.userTargetY
-    const targetHeadY = this.userTracked
-      ? -deadzoneY * TRACK_HEAD_PITCH_MAX * headTrackScale
-      : 0
-    this.trackHeadX = follow(this.trackHeadX, targetHeadX, dt, 0.38)
-    this.trackHeadY = follow(this.trackHeadY, targetHeadY, dt, 0.45)
+    const headTrackScale = mode === 'think' ? 0.65 : 1.0
+    const targetHeadX = this.smoothTargetX * TRACK_HEAD_YAW_MAX * headTrackScale
+    const deadzoneY = Math.abs(this.smoothTargetY) < 0.03 ? 0 : this.smoothTargetY
+    const targetHeadY = -deadzoneY * TRACK_HEAD_PITCH_MAX * headTrackScale
+    this.trackHeadX = follow(this.trackHeadX, targetHeadX, dt, 0.32)
+    this.trackHeadY = follow(this.trackHeadY, targetHeadY, dt, 0.36)
 
     // Update lingering mood afterglow (decays gently toward a 0.28 baseline over ~25s)
     const moodFloor = this.mood === 'neutral' ? 0 : 0.28
@@ -587,61 +592,52 @@ export class AvatarLife {
     if (this.time >= this.nextSaccade) {
       const r1 = this.rand() * 2 - 1
       const r2 = this.rand() * 2 - 1
-      const eyeContactBias = this.rand() < 0.48
+      const eyeContactBias = this.rand() < 0.68
       if (mode === 'think') {
-        // Cognitive gaze aversion: look up and slightly to one side, occasionally glancing back
-        if (this.rand() < 0.25) {
-          this.saccadeOffsetX = r1 * 0.06
-          this.saccadeOffsetY = 0.08 + Math.abs(r2) * 0.08
+        // Gentle reflective upward glance while maintaining primary connection
+        if (this.rand() < 0.45) {
+          this.saccadeOffsetX = r1 * 0.035
+          this.saccadeOffsetY = 0.06 + Math.abs(r2) * 0.05
         } else {
-          this.saccadeOffsetX = (r1 >= 0 ? 1 : -1) * (0.08 + Math.abs(r1) * 0.14)
-          this.saccadeOffsetY = 0.18 + Math.abs(r2) * 0.12
+          this.saccadeOffsetX = (r1 >= 0 ? 1 : -1) * (0.04 + Math.abs(r1) * 0.07)
+          this.saccadeOffsetY = 0.12 + Math.abs(r2) * 0.08
         }
-        this.nextSaccade = this.time + 0.9 + this.rand() * 1.4
+        this.nextSaccade = this.time + 1.0 + this.rand() * 1.5
       } else if (mode === 'listen') {
         // Attentive eye triangle saccades (left eye -> right eye -> bridge)
-        this.saccadeOffsetX = eyeContactBias ? 0 : r1 * 0.045
-        this.saccadeOffsetY = eyeContactBias ? 0 : r2 * 0.03
-        this.nextSaccade = this.time + 1.4 + this.rand() * 2.1
+        this.saccadeOffsetX = eyeContactBias ? 0 : r1 * 0.035
+        this.saccadeOffsetY = eyeContactBias ? 0 : r2 * 0.025
+        this.nextSaccade = this.time + 1.5 + this.rand() * 2.2
       } else if (mode === 'speak') {
-        // Expressive conversational saccades that return to eye contact on emphasis
-        const centered = eyeContactBias || this.speechEnergy > 0.28
-        this.saccadeOffsetX = centered ? r1 * 0.025 : r1 * 0.075
-        this.saccadeOffsetY = centered ? r2 * 0.02 : r2 * 0.05
-        this.nextSaccade = this.time + 1.0 + this.rand() * 1.8
+        //Steady conversational eye contact with subtle micro-saccades
+        const centered = eyeContactBias || this.speechEnergy > 0.22
+        this.saccadeOffsetX = centered ? r1 * 0.018 : r1 * 0.045
+        this.saccadeOffsetY = centered ? r2 * 0.015 : r2 * 0.03
+        this.nextSaccade = this.time + 1.2 + this.rand() * 1.9
       } else {
         // Idle: calm micro-saccades around the user's position (or center)
-        this.saccadeOffsetX = eyeContactBias ? 0 : r1 * 0.05
-        this.saccadeOffsetY = eyeContactBias ? 0 : r2 * 0.03
+        this.saccadeOffsetX = eyeContactBias ? r1 * 0.014 : r1 * 0.038
+        this.saccadeOffsetY = eyeContactBias ? r2 * 0.01 : r2 * 0.025
         this.nextSaccade = this.time + 2.2 + this.rand() * 2.8
       }
     }
 
     // Anchor gaze on the tracked user (with VOR compensation as the head catches up)
-    const userAnchorScale = mode === 'think' ? 0.35 : 1.0
-    const userGazeX = this.userTracked
-      ? (this.userTargetX * TRACK_GAZE_X_MAX - this.trackHeadX * 0.45) * userAnchorScale
-      : 0
-    const userGazeY = this.userTracked
-      ? (this.userTargetY * TRACK_GAZE_Y_MAX + this.trackHeadY * 0.45) * userAnchorScale
-      : 0
+    const userAnchorScale = mode === 'think' ? 0.65 : 1.0
+    const userGazeX =
+      (this.smoothTargetX * TRACK_GAZE_X_MAX - this.trackHeadX * 0.35) * userAnchorScale
+    const userGazeY =
+      (this.smoothTargetY * TRACK_GAZE_Y_MAX + this.trackHeadY * 0.35) * userAnchorScale
 
-    this.targetGazeX = Math.max(-0.65, Math.min(0.65, userGazeX + this.saccadeOffsetX))
-    this.targetGazeY = Math.max(-0.55, Math.min(0.55, userGazeY + this.saccadeOffsetY))
+    this.targetGazeX = Math.max(-0.55, Math.min(0.55, userGazeX + this.saccadeOffsetX))
+    this.targetGazeY = Math.max(-0.45, Math.min(0.45, userGazeY + this.saccadeOffsetY))
 
-    // Smooth eye tracking (tau ~90 ms) without abrupt twitching
-    this.gazeX = follow(this.gazeX, this.targetGazeX, dt, 0.09)
-    this.gazeY = follow(this.gazeY, this.targetGazeY, dt, 0.09)
+    // Smooth eye tracking (tau ~110 ms) without abrupt twitching
+    this.gazeX = follow(this.gazeX, this.targetGazeX, dt, 0.11)
+    this.gazeY = follow(this.gazeY, this.targetGazeY, dt, 0.11)
   }
 
   private advanceBlink(dt: number, mode: LifeMode): number {
-    if (mode === 'speak') {
-      this.blinkT = -1
-      if (this.nextBlink < this.time + 0.8) {
-        this.nextBlink = this.time + 0.8 + this.rand() * 2.2
-      }
-      return 0
-    }
     if (this.blinkT < 0 && this.time >= this.nextBlink) {
       this.blinkT = 0
       this.blinkPattern = Math.floor(this.rand() * BLINK_PATTERNS.length)
@@ -652,8 +648,9 @@ export class AvatarLife {
     this.blinkT += dt
     if (this.blinkT >= BLINK_DURATION) {
       this.blinkT = -1
-      const doubled = this.rand() < 0.22
-      this.nextBlink = this.time + (doubled ? 0.16 + this.rand() * 0.1 : 2.4 + this.rand() * 3.4)
+      const doubled = mode !== 'speak' && this.rand() < 0.22
+      const baseGap = mode === 'speak' ? 3.0 + this.rand() * 2.8 : 2.4 + this.rand() * 3.4
+      this.nextBlink = this.time + (doubled ? 0.16 + this.rand() * 0.1 : baseGap)
     }
     return value
   }
@@ -684,6 +681,9 @@ export class AvatarLife {
     const gx = this.gazeX * openFactor
     const gy = this.gazeY * openFactor
 
+    // ARKit eye morphs are named from the avatar's anatomical perspective:
+    // In gbot's skin.glb, eyeLookOutRight + eyeLookInLeft shift the pupils toward +X
+    // (the right side of the user's screen), matching head +Y yaw rotation (trackHeadX > 0).
     if (gx >= 0) {
       face.eyeLookOutRight = Math.min(1, (face.eyeLookOutRight ?? 0) + gx)
       face.eyeLookInLeft = Math.min(1, (face.eyeLookInLeft ?? 0) + gx)
@@ -786,13 +786,13 @@ export class AvatarLife {
       const lifeVal = lifeFace[name] ?? 0
       const speechVal = src[name] ?? 0
       if (GAZE_CHANNELS.has(name)) {
-        // Combine speech gaze with live conversational micro-saccades, damped during blinks
-        out[name] = Math.min(1, (speechVal * sp + lifeVal * (1 - sp * 0.35)) * blinkDamp)
+        // Drive gaze exclusively from AvatarLife so audio-only LAM eye noise never breaks eye contact
+        out[name] = Math.min(1, lifeVal * blinkDamp)
       } else if (EYE_WIDE_CHANNELS.has(name)) {
         // Suppress eyeWide during blinks so eyelids close completely
         out[name] = Math.min(1, (lifeVal * (1 - sp) + speechVal * sp) * blinkDamp)
       } else if (name === 'eyeBlinkLeft' || name === 'eyeBlinkRight') {
-        out[name] = Math.min(1, lifeVal * (1 - sp) + speechVal * sp)
+        out[name] = Math.min(1, Math.max(lifeVal, speechVal * sp))
       } else {
         out[name] = Math.min(1, lifeVal * (1 - sp) + speechVal * sp)
       }
@@ -800,6 +800,32 @@ export class AvatarLife {
 
     return out
   }
+}
+
+function slerpQuatInPlace(
+  q: { x: number; y: number; z: number; w: number },
+  rest: { x: number; y: number; z: number; w: number },
+  keepAnimFactor: number
+) {
+  let rx = rest.x
+  let ry = rest.y
+  let rz = rest.z
+  let rw = rest.w
+  if (q.x * rx + q.y * ry + q.z * rz + q.w * rw < 0) {
+    rx = -rx
+    ry = -ry
+    rz = -rz
+    rw = -rw
+  }
+  const nx = rx + (q.x - rx) * keepAnimFactor
+  const ny = ry + (q.y - ry) * keepAnimFactor
+  const nz = rz + (q.z - rz) * keepAnimFactor
+  const nw = rw + (q.w - rw) * keepAnimFactor
+  const invLen = 1 / (Math.hypot(nx, ny, nz, nw) || 1)
+  q.x = nx * invLen
+  q.y = ny * invLen
+  q.z = nz * invLen
+  q.w = nw * invLen
 }
 
 export function attachAvatarLife(renderer: any, life: AvatarLife): boolean {
@@ -814,16 +840,16 @@ export function attachAvatarLife(renderer: any, life: AvatarLife): boolean {
   const neck = bones.find((bone) => bone.name === 'neckLower') ?? null
   if (!head) return false
 
-  // Save clean post-mixer bone transforms so AvatarLife offsets never accumulate
-  // across frames when Three.js PropertyMixer skips unchanged/paused bone tracks.
-  let baseHeadY = head.position.y
-  let baseHeadQuat = {
+  // Capture camera-facing bind/rest pose of head & neck so mocap clips in animation.glb
+  // (speak_3, speak_4, think_part_1..3 which yaw the head 6-8 deg sideways) are damped
+  // by 75%, keeping the avatar naturally facing the user while preserving subtle life.
+  const restHeadQuat = {
     x: head.quaternion.x,
     y: head.quaternion.y,
     z: head.quaternion.z,
     w: head.quaternion.w,
   }
-  let baseNeckQuat = neck
+  const restNeckQuat = neck
     ? {
         x: neck.quaternion.x,
         y: neck.quaternion.y,
@@ -831,6 +857,12 @@ export function attachAvatarLife(renderer: any, life: AvatarLife): boolean {
         w: neck.quaternion.w,
       }
     : null
+
+  // Save clean post-mixer bone transforms so AvatarLife offsets never accumulate
+  // across frames when Three.js PropertyMixer skips unchanged/paused bone tracks.
+  let baseHeadY = head.position.y
+  let baseHeadQuat = { ...restHeadQuat }
+  let baseNeckQuat = restNeckQuat ? { ...restNeckQuat } : null
 
   sanitizeAnimManager(renderer?.animManager, renderer?.chatState)
 
@@ -865,6 +897,26 @@ export function attachAvatarLife(renderer: any, life: AvatarLife): boolean {
         z: neck.quaternion.z,
         w: neck.quaternion.w,
       }
+    }
+
+    // Lock head & neck horizontal yaw to camera-facing rest pose before applying AvatarLife
+    // tracking, so baked mocap loops in animation.glb (idle: -0.6..+1.8 deg yaw every 8s,
+    // speak_1..4: -3.6..+5.9 deg yaw) never make her shake her head "no" at rest or while speaking.
+    slerpQuatInPlace(head.quaternion, restHeadQuat, 0.15)
+    head.quaternion.y = restHeadQuat.y
+    const hNorm = 1 / (Math.hypot(head.quaternion.x, head.quaternion.y, head.quaternion.z, head.quaternion.w) || 1)
+    head.quaternion.x *= hNorm
+    head.quaternion.y *= hNorm
+    head.quaternion.z *= hNorm
+    head.quaternion.w *= hNorm
+    if (neck && restNeckQuat) {
+      slerpQuatInPlace(neck.quaternion, restNeckQuat, 0.15)
+      neck.quaternion.y = restNeckQuat.y
+      const nNorm = 1 / (Math.hypot(neck.quaternion.x, neck.quaternion.y, neck.quaternion.z, neck.quaternion.w) || 1)
+      neck.quaternion.x *= nNorm
+      neck.quaternion.y *= nNorm
+      neck.quaternion.z *= nNorm
+      neck.quaternion.w *= nNorm
     }
 
     life.applyBones(head, neck)

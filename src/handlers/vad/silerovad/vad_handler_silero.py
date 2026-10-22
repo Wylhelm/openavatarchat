@@ -62,21 +62,23 @@ class HumanAudioVADContext(HandlerContext):
         self.slice_context: Optional[SliceContext] = None
 
         self.speech_id: int = 0
-        self.echo_low_rms: float = 0.0004
-        self.echo_mid_rms: float = 0.0015
+        self.echo_low_rms: float = 0.0005
+        self.echo_mid_rms: float = 0.0020
         self.echo_mag_env: Optional[np.ndarray] = None
         self.was_avatar_speaking: bool = False
+        self.avatar_speech_frames: int = 0
 
     def reset_echo_tracker(self):
-        self.echo_low_rms = 0.0004
-        self.echo_mid_rms = 0.0015
+        self.echo_low_rms = 0.0005
+        self.echo_mid_rms = 0.0020
         self.echo_mag_env = None
+        self.avatar_speech_frames = 0
 
     def filter_mobile_no_aec_clip(self, clip: np.ndarray) -> Tuple[np.ndarray, np.ndarray, bool]:
         """
         When mobile opens getUserMedia with echoCancellation=false & autoGainControl=false
         (to avoid iOS VoiceProcessingIO WebAudio crackling), this method:
-        1) During avatar speech (before barge-in START): separates 270 Hz high-passed
+        1) During avatar speech (before barge-in START): separates 310 Hz high-passed
            phone speaker echo from real human vocal-cord fundamental energy (93-225 Hz).
            Returns (vad_clip, history_clip, allow_voice).
         2) Outside avatar speech (or once START is active): applies gentle software gain
@@ -99,6 +101,8 @@ class HumanAudioVADContext(HandlerContext):
             zeros = np.zeros_like(clip)
             return zeros, zeros, False
 
+        self.avatar_speech_frames += 1
+
         spec = np.fft.rfft(clip * _HANN_512)
         mag = np.abs(spec).astype(np.float32)
         # Vocal-cord fundamental band: 93.75..187.5 Hz (bins 3..6) + 0.8 * 218.75 Hz (bin 7)
@@ -111,9 +115,9 @@ class HumanAudioVADContext(HandlerContext):
         low_mid_ratio = low_rms / (mid_rms + 1e-6)
 
         # Pure speaker echo frame (high-passed at 310 Hz on the client player)
-        if low_mid_ratio < 0.058 and mid_rms > 0.0004:
+        if low_mid_ratio < 0.068 and mid_rms > 0.0004:
             self.echo_low_rms = 0.85 * self.echo_low_rms + 0.15 * low_rms
-            self.echo_mid_rms = max(0.92 * self.echo_mid_rms, 0.80 * self.echo_mid_rms + 0.20 * mid_rms)
+            self.echo_mid_rms = max(0.93 * self.echo_mid_rms, 0.80 * self.echo_mid_rms + 0.20 * mid_rms)
             if self.echo_mag_env is None:
                 self.echo_mag_env = mag.copy()
             else:
@@ -121,10 +125,27 @@ class HumanAudioVADContext(HandlerContext):
                     0.90 * self.echo_mag_env, 0.75 * self.echo_mag_env + 0.25 * mag
                 )
 
+        # During the first ~10 frames (320ms) after StartSpeech, the echo tracker is still
+        # calibrating on the first spoken syllable, so require clear low-frequency voice energy.
+        calibrating = self.avatar_speech_frames <= 10
         user_voice_detected = (
-            (rms >= 0.0016 and low_rms >= max(0.00075, self.echo_low_rms * 2.4) and low_mid_ratio >= 0.070)
-            or (mid_rms < 0.0015 and rms >= 0.0022 and low_rms >= 0.00070)
-            or (rms >= max(0.010, self.echo_mid_rms * 2.8) and low_rms >= max(0.0009, self.echo_low_rms * 1.8))
+            (
+                rms >= 0.0022
+                and low_rms >= max(0.00095 if calibrating else 0.00080, self.echo_low_rms * 2.6)
+                and low_mid_ratio >= (0.088 if calibrating else 0.078)
+            )
+            or (
+                not calibrating
+                and mid_rms < 0.0014
+                and rms >= 0.0026
+                and low_rms >= max(0.00085, self.echo_low_rms * 2.0)
+                and low_mid_ratio >= 0.080
+            )
+            or (
+                rms >= max(0.012, self.echo_mid_rms * 2.8)
+                and low_rms >= max(0.0011, self.echo_low_rms * 2.1)
+                and low_mid_ratio >= 0.075
+            )
         )
 
         if not user_voice_detected:
@@ -198,9 +219,10 @@ class HumanAudioVADContext(HandlerContext):
                 logger.info(f"VAD pre_start to start got timestamp {head_sample_id}")
             return output_audio, extra_args
         else:
-            # Allow up to 3 frames (~96ms) of consonant/diphthong dip during PRE_START
-            # so natural speech does not immediately abort after the first 32ms frame.
-            if self.silence_length > self.clip_size * 3:
+            # Allow up to 2 frames (~64ms) during barge-in or 3 frames (~96ms) in normal speech
+            # of consonant/diphthong dip during PRE_START.
+            max_dip_frames = 2 if self._is_avatar_active() else 3
+            if self.silence_length > self.clip_size * max_dip_frames:
                 logger.info("Back to not started status")
                 self.speaking_status = SpeakingStatus.END
                 self.speech_length = 0
@@ -251,7 +273,7 @@ class HumanAudioVADContext(HandlerContext):
         ):
             rms = float(np.sqrt(np.mean(np.square(clip)))) if clip.size > 0 else 0.0
             min_rms = (
-                min(self.config.barge_in_min_rms, 0.0015)
+                min(self.config.barge_in_min_rms, 0.0018)
                 if bool(getattr(self.shared_states, "client_no_aec", False))
                 else self.config.barge_in_min_rms
             )

@@ -129,14 +129,17 @@ class RtcStream(AsyncAudioVideoStreamHandler):
             if not self.first_audio_emitted:
                 await asyncio.sleep(0.1)
             self.emit_counter.add_property("video_emit")
+            # Like emit(), return a dummy frame before fastrtc/aiortc's 60s media timeout
+            # closes the peer connection when LAM renders client-side (no server video frames).
+            loop_deadline = time.monotonic() + 15
             while not self.quit.is_set():
                 video_frame_data: ChatData = await self.client_session_delegate.get_data(EngineChannelType.VIDEO)
-                if video_frame_data is None or video_frame_data.data is None:
-                    continue
-                frame_data = video_frame_data.data.get_main_data().squeeze()
-                if frame_data is None:
-                    continue
-                return frame_data
+                if video_frame_data is not None and video_frame_data.data is not None:
+                    frame_data = video_frame_data.data.get_main_data().squeeze()
+                    if frame_data is not None:
+                        return frame_data
+                if time.monotonic() >= loop_deadline:
+                    return np.zeros((16, 16, 3), dtype=np.uint8)
         except Exception as e:
             logger.opt(exception=e).error(f"Error in video_emit: ")
             raise

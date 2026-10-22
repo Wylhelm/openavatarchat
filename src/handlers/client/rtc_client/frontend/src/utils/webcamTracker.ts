@@ -22,18 +22,20 @@ const SAMPLE_H = 48
 const BLOCK_SIZE = 8
 const GRID_W = SAMPLE_W / BLOCK_SIZE // 8
 const GRID_H = SAMPLE_H / BLOCK_SIZE // 6
-const TRACK_INTERVAL_MS = 80 // ~12.5 Hz
+const TRACK_INTERVAL_MS = 66 // ~15 Hz
 const HOLD_TIMEOUT_MS = 6000
 const NOD_WINDOW_MS = 900
 const NOD_COOLDOWN_MS = 3500
-const POSITION_DEADBAND_X = 0.055
-const POSITION_DEADBAND_Y = 0.055
+const POSITION_DEADBAND_X = 0.045
+const POSITION_DEADBAND_Y = 0.045
 
 export function computeSkinAndMotionCentroid(
   rgba: Uint8ClampedArray,
   prevLuma: Float32Array | null,
   width: number,
-  height: number
+  height: number,
+  priorX?: number,
+  priorY?: number
 ): { x: number; y: number; confidence: number; smile: number; moving: boolean } {
   const bw = Math.max(1, Math.floor(width / GRID_W))
   const bh = Math.max(1, Math.floor(height / GRID_H))
@@ -101,6 +103,7 @@ export function computeSkinAndMotionCentroid(
 
   // Coherent block motion: only blocks whose 8x8 average luma shifted by > 5.5
   let movingBlocks = 0
+  let skinMovingBlocks = 0
   let motionSumX = 0
   let motionSumY = 0
   let motionWeight = 0
@@ -112,7 +115,10 @@ export function computeSkinAndMotionCentroid(
       const diff = blockDiff[bIdx]
       if (diff > 5.5) {
         movingBlocks++
-        const skinBoost = 0.7 + blockSkin[bIdx] * 1.3
+        if (blockSkin[bIdx] >= 0.15) {
+          skinMovingBlocks++
+        }
+        const skinBoost = 0.5 + blockSkin[bIdx] * 1.8
         const w = (diff - 5.0) * skinBoost * vBias
         motionSumX += (bx + 0.5) * w
         motionSumY += (by + 0.5) * w
@@ -121,25 +127,62 @@ export function computeSkinAndMotionCentroid(
     }
   }
 
-  // Coherent movement requires at least 2 blocks (128 pixels) shifting together
-  if (movingBlocks >= 2 && motionWeight > 0) {
+  // Coherent movement: between 2 and 18 blocks shifting together (if >18 blocks move,
+  // it's global handheld camera shake or auto-exposure shift on mobile, so use the skin cluster).
+  if (
+    movingBlocks >= 2 &&
+    movingBlocks <= 18 &&
+    (skinMovingBlocks >= 1 || totalSkinPixels < (width * height) * 0.015) &&
+    motionWeight > 0
+  ) {
     const cx = motionSumX / motionWeight / GRID_W
     const cy = motionSumY / motionWeight / GRID_H
-    const normX = Math.max(-1, Math.min(1, (0.5 - cx) * 2.3))
-    const normY = Math.max(-1, Math.min(1, (0.46 - cy) * 2.0))
+    const normX = Math.max(-1, Math.min(1, (0.5 - cx) * 2.15))
+    const normY = Math.max(-0.9, Math.min(0.9, (0.46 - cy) * 1.85))
     const confidence = Math.min(1, movingBlocks / 6)
     return { x: normX, y: normY, confidence, smile: 0, moving: true }
   }
 
-  // Static fallback: find the strongest contiguous skin cluster (peak block + its 3x3 neighborhood)
+  // Static fallback: find the strongest 3x3 neighborhood skin cluster, with temporal continuity
+  // toward the previous tracked block so the peak never hops left-right between two blocks ("head shake").
+  const priorBx =
+    priorX !== undefined && Number.isFinite(priorX)
+      ? (0.5 - priorX / 2.1) * GRID_W - 0.5
+      : null
+  const priorBy =
+    priorY !== undefined && Number.isFinite(priorY)
+      ? (0.46 - priorY / 1.8) * GRID_H - 0.5
+      : null
+
   let bestBx = -1
   let bestBy = -1
-  let bestScore = 0
+  let bestClusterScore = 0
+  let bestPeakSkin = 0
   for (let by = 0; by < GRID_H - 1; by++) {
     for (let bx = 0; bx < GRID_W; bx++) {
-      const s = blockSkin[by * GRID_W + bx]
-      if (s > bestScore) {
-        bestScore = s
+      const rawSkin = blockSkin[by * GRID_W + bx]
+      if (rawSkin < 0.18) continue
+      let neighborhoodSum = 0
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          const nx = bx + dx
+          const ny = by + dy
+          if (nx >= 0 && nx < GRID_W && ny >= 0 && ny < GRID_H) {
+            const weight = dx === 0 && dy === 0 ? 1.5 : 0.65
+            neighborhoodSum += blockSkin[ny * GRID_W + nx] * weight
+          }
+        }
+      }
+      const edgePenalty = bx === 0 || bx === GRID_W - 1 ? 0.78 : 1.0
+      let temporalBonus = 1.0
+      if (priorBx !== null && priorBy !== null) {
+        const distSq = (bx - priorBx) * (bx - priorBx) + (by - priorBy) * (by - priorBy)
+        temporalBonus = 1.0 + 0.35 * Math.exp(-distSq * 0.45)
+      }
+      const score = neighborhoodSum * edgePenalty * temporalBonus
+      if (score > bestClusterScore) {
+        bestClusterScore = score
+        bestPeakSkin = rawSkin
         bestBx = bx
         bestBy = by
       }
@@ -148,25 +191,27 @@ export function computeSkinAndMotionCentroid(
 
   const area = width * height
   const skinRatio = totalSkinPixels / area
-  if (bestScore < 0.2 || skinRatio < 0.012) {
+  if (bestBx < 0 || bestPeakSkin < 0.18 || skinRatio < 0.01) {
     return { x: 0, y: 0, confidence: 0, smile: 0, moving: false }
   }
 
-  // Compute centroid only within the 3x3 neighborhood of the peak skin block
-  // so distant warm-colored walls cannot dilute the face position
+  // Compute centroid over a 5x3 horizontal/vertical window around the peak skin block
+  // so the centroid glides smoothly across block boundaries without discrete jumps.
   let clusterSumX = 0
   let clusterSumY = 0
   let clusterWeight = 0
   for (let dy = -1; dy <= 1; dy++) {
-    for (let dx = -1; dx <= 1; dx++) {
+    for (let dx = -2; dx <= 2; dx++) {
       const nx = bestBx + dx
       const ny = bestBy + dy
       if (nx >= 0 && nx < GRID_W && ny >= 0 && ny < GRID_H) {
         const w = blockSkin[ny * GRID_W + nx]
-        if (w > 0.1) {
-          clusterSumX += (nx + 0.5) * w
-          clusterSumY += (ny + 0.5) * w
-          clusterWeight += w
+        if (w > 0.08) {
+          const falloff = Math.abs(dx) === 2 ? 0.5 : 1.0
+          const effW = w * falloff
+          clusterSumX += (nx + 0.5) * effW
+          clusterSumY += (ny + 0.5) * effW
+          clusterWeight += effW
         }
       }
     }
@@ -178,9 +223,9 @@ export function computeSkinAndMotionCentroid(
 
   const cx = clusterSumX / clusterWeight / GRID_W
   const cy = clusterSumY / clusterWeight / GRID_H
-  const normX = Math.max(-1, Math.min(1, (0.5 - cx) * 2.3))
-  const normY = Math.max(-1, Math.min(1, (0.46 - cy) * 2.0))
-  const confidence = Math.min(1, bestScore * 0.85)
+  const normX = Math.max(-0.95, Math.min(0.95, (0.5 - cx) * 2.1))
+  const normY = Math.max(-0.85, Math.min(0.85, (0.46 - cy) * 1.8))
+  const confidence = Math.min(1, bestPeakSkin * 0.95)
   return { x: normX, y: normY, confidence, smile: 0, moving: false }
 }
 
@@ -231,6 +276,8 @@ export class WebcamFaceTracker {
   private lastNodAt = 0
   private lastX = 0
   private lastY = 0
+  private baselineX = 0
+  private baselineY = 0
   private hasInitialLock = false
   private history: Array<{ t: number; x: number; y: number }> = []
   private onUpdate: (target: UserTargetPoint | null) => void
@@ -258,6 +305,8 @@ export class WebcamFaceTracker {
     this.prevLuma = new Float32Array(SAMPLE_W * SAMPLE_H)
     this.history = []
     this.hasInitialLock = false
+    this.baselineX = 0
+    this.baselineY = 0
 
     this.timer = setInterval(() => {
       void this.sampleFrame()
@@ -276,20 +325,45 @@ export class WebcamFaceTracker {
     this.onUpdate(null)
   }
 
-  private updateSmoothedTarget(now: number, rawX: number, rawY: number, confidence: number) {
+  private updateSmoothedTarget(
+    now: number,
+    rawX: number,
+    rawY: number,
+    confidence: number,
+    useAdaptiveCenter = false
+  ) {
+    let adjX = rawX
+    let adjY = rawY
+    if (useAdaptiveCenter) {
+      if (!this.hasInitialLock) {
+        // Treat only part of the initial static offset as background bias so real off-center
+        // faces still register immediately, while static room asymmetry slowly calibrates out.
+        this.baselineX = rawX * 0.35
+        this.baselineY = rawY * 0.35
+      } else {
+        this.baselineX += (rawX - this.baselineX) * 0.025
+        this.baselineY += (rawY - this.baselineY) * 0.025
+      }
+      adjX = Math.max(-1, Math.min(1, (rawX - this.baselineX) * 1.25))
+      adjY = Math.max(-0.9, Math.min(0.9, (rawY - this.baselineY) * 1.2))
+    }
+
     if (!this.hasInitialLock) {
-      this.lastX = rawX
-      this.lastY = rawY
+      this.lastX = adjX
+      this.lastY = adjY
       this.hasInitialLock = true
     } else {
-      const dx = rawX - this.lastX
-      const dy = rawY - this.lastY
-      // Hysteresis deadband: ignore tiny fluctuations so the avatar is 100% still at rest
+      const dx = adjX - this.lastX
+      const dy = adjY - this.lastY
+      // Soft-threshold deadband: subtract the deadband radius before applying gain so
+      // the target is 100% still at rest and starts moving with zero jump when leaving the deadband.
       if (Math.abs(dx) > POSITION_DEADBAND_X) {
-        this.lastX += dx * 0.35
+        const excessX = dx - Math.sign(dx) * POSITION_DEADBAND_X
+        this.lastX += excessX * 0.35
       }
       if (Math.abs(dy) > POSITION_DEADBAND_Y) {
-        this.lastY += dy * 0.3
+        const excessY = dy - Math.sign(dy) * POSITION_DEADBAND_Y
+        this.lastY += excessY * 0.30
       }
     }
     this.lastSeenAt = now
@@ -353,8 +427,8 @@ export class WebcamFaceTracker {
             const box = faces[0].boundingBox
             const cx = (box.x + box.width * 0.5) / video.videoWidth
             const cy = (box.y + box.height * 0.42) / video.videoHeight
-            const normX = Math.max(-1, Math.min(1, (0.5 - cx) * 2.2))
-            const normY = Math.max(-1, Math.min(1, (0.46 - cy) * 2.0))
+            const normX = Math.max(-1, Math.min(1, (0.5 - cx) * 2.15))
+            const normY = Math.max(-0.9, Math.min(0.9, (0.46 - cy) * 1.85))
             this.updateSmoothedTarget(now, normX, normY, 1)
             return
           }
@@ -365,13 +439,37 @@ export class WebcamFaceTracker {
 
       // 2. Downsampled 8x6 block motion + local skin cluster tracker
       if (!this.ctx) return
-      this.ctx.drawImage(video, 0, 0, SAMPLE_W, SAMPLE_H)
+      const vw = video.videoWidth
+      const vh = video.videoHeight
+      // Crop the center 4:3 region without stretching when the camera is 9:16 portrait (mobile)
+      // or 16:9 widescreen, so horizontal/vertical proportions are never distorted.
+      const targetAspect = SAMPLE_W / SAMPLE_H
+      const videoAspect = vw / vh
+      let sx = 0
+      let sy = 0
+      let sw = vw
+      let sh = vh
+      if (videoAspect < targetAspect) {
+        // Portrait (e.g. mobile 9:16): keep full width, crop top/bottom margins
+        sh = Math.round(vw / targetAspect)
+        sy = Math.round((vh - sh) * 0.42)
+      } else if (videoAspect > targetAspect * 1.15) {
+        // Wide landscape (16:9): crop extreme left/right room edges
+        sw = Math.round(vh * targetAspect)
+        sx = Math.round((vw - sw) * 0.5)
+      }
+      this.ctx.drawImage(video, sx, sy, sw, sh, 0, 0, SAMPLE_W, SAMPLE_H)
       const img = this.ctx.getImageData(0, 0, SAMPLE_W, SAMPLE_H)
-      const res = computeSkinAndMotionCentroid(img.data, this.prevLuma, SAMPLE_W, SAMPLE_H)
-      // Update target on coherent motion OR strong skin cluster presence (e.g. mobile
-      // where the user tilts/shifts the phone or moves smoothly across the camera frame).
-      if ((res.moving && res.confidence > 0.22) || res.confidence > 0.35) {
-        this.updateSmoothedTarget(now, res.x, res.y, res.confidence)
+      const res = computeSkinAndMotionCentroid(
+        img.data,
+        this.prevLuma,
+        SAMPLE_W,
+        SAMPLE_H,
+        this.hasInitialLock ? this.lastX + this.baselineX : undefined,
+        this.hasInitialLock ? this.lastY + this.baselineY : undefined
+      )
+      if ((res.moving && res.confidence > 0.2) || res.confidence > 0.25) {
+        this.updateSmoothedTarget(now, res.x, res.y, res.confidence, true)
       } else {
         this.checkHoldTimeout()
       }

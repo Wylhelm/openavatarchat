@@ -93,19 +93,26 @@ export class Processor {
   private _interruptedBatchName?: string
   private _arkitFaceShape?: number
   private _tts2FaceShape?: number
+  private _generation = 0
   constructor(ee: EventEmitter) {
     this.ee = ee
   }
   add(payload: IPayload) {
     const { avatar_motion_data } = payload
+    const gen = this._generation
     this._motionDataGroupHandlerQueue.add(
-      async () =>
+      async () => {
+        if (gen !== this._generation) return
         await this._motionDataGroupHandler(
           avatar_motion_data as IAvatarMotionData,
-        ),
+          gen,
+        )
+      },
     )
   }
   clear() {
+    this._generation++
+    this._motionDataGroupHandlerQueue.clear()
     this._motionDataGroups.forEach((group) => {
       group.player?.destroy()
     })
@@ -137,6 +144,7 @@ export class Processor {
   }
 
   interrupt() {
+    this._generation++
     this._motionDataGroupHandlerQueue.clear()
     this._motionDataGroups.forEach((group) => {
       if (group.batch_id != null) {
@@ -294,8 +302,12 @@ export class Processor {
     return null
   }
 
-  private async _motionDataGroupHandler(avatar_motion_data: IAvatarMotionData) {
+  private async _motionDataGroupHandler(
+    avatar_motion_data: IAvatarMotionData,
+    gen = this._generation,
+  ) {
     try {
+      if (gen !== this._generation) return
       const {
         first_package,
         motion_data_slice,
@@ -356,6 +368,7 @@ export class Processor {
           //   lastMotionGroup.merged_motion_data,
           // );
           const { parsedData, jsonSize, binSize } = await unpack(blob)
+          if (gen !== this._generation) return
           lastMotionGroup.jsonSize = jsonSize
           lastMotionGroup.binSize = binSize
           const bin = blob.slice(12 + lastMotionGroup.jsonSize!)
@@ -385,7 +398,8 @@ export class Processor {
                 this._tts2FaceShape = tts2faceDef.shape[1]
               }
             }
-            this._motionDataGroups.pop()
+            const idx = this._motionDataGroups.indexOf(lastMotionGroup)
+            if (idx !== -1) this._motionDataGroups.splice(idx, 1)
             return
           }
           const batchCheckResult = this._connectBatch(
@@ -402,6 +416,7 @@ export class Processor {
             prevMotionGroup,
             bin,
           )
+          if (gen !== this._generation) return
           // await this._handletts2faceConfig(
           //   parsedData,
           //   lastMotionGroup,
@@ -414,7 +429,9 @@ export class Processor {
             prevMotionGroup,
             bin,
             is_audio_mute || false,
+            gen,
           )
+          if (gen !== this._generation) return
           this._handleEvents(parsedData)
         }
       }
@@ -423,12 +440,24 @@ export class Processor {
       this.ee.emit(EventTypes.ErrorReceived, (err as Error).message)
     }
   }
+  private _sameBatch(
+    a: IAvatarMotionGroup | undefined,
+    b: IAvatarMotionGroup | undefined,
+  ): boolean {
+    if (!a || !b) return false
+    if (a.batch_name && b.batch_name) {
+      return a.batch_name === b.batch_name
+    }
+    return a.batch_id !== undefined && a.batch_id === b.batch_id
+  }
+
   private async _handleAudioConfig(
     parsedData: IParsedData,
     lastMotionGroup: IAvatarMotionGroup,
     prevMotionGroup: IAvatarMotionGroup,
     bin: Blob,
     isPlayerMute: boolean,
+    gen = this._generation,
   ) {
     const { data_records = {}, end_of_batch } = parsedData
     const { audio } = data_records
@@ -436,18 +465,35 @@ export class Processor {
       const { sample_rate, shape, data_offset, data_type } = audio
       const inputCodec = InputCodecs[data_type]
       const TargetTypedArray = TypedArrays[data_type]
+      const shapeLength = shape.reduce(
+        (acc: number, cur: number) => acc * cur,
+        inputCodec === 'Int16' ? 2 : 4,
+      )
+      const audioBlobSliceStart = data_offset
+      const audioBlobSliceEnd = data_offset + shapeLength
+      const audioBlob = bin.slice(audioBlobSliceStart, audioBlobSliceEnd)
+      const audioArrayBuffer = await readBlobBytes(audioBlob)
+      if (gen !== this._generation) return
+
       if (lastMotionGroup.player === undefined) {
-        if (
+        const existingSameBatch =
           prevMotionGroup &&
           prevMotionGroup.player &&
-          prevMotionGroup.batch_id === lastMotionGroup.batch_id
-        ) {
-          lastMotionGroup.player = prevMotionGroup.player
+          this._sameBatch(prevMotionGroup, lastMotionGroup)
+            ? prevMotionGroup
+            : this._motionDataGroups.find(
+                (item) =>
+                  item !== lastMotionGroup &&
+                  item.player &&
+                  this._sameBatch(item, lastMotionGroup),
+              )
+        if (existingSameBatch && existingSameBatch.player) {
+          lastMotionGroup.player = existingSameBatch.player
         } else if (sample_rate) {
-          // Clean up any leftover motion groups from earlier batches so the new
-          // turn's Player always starts immediately with autoPlay = true.
+          // Clean up any leftover motion groups from earlier turns/batches so
+          // two Players can NEVER overlap and speak over each other.
           this._motionDataGroups = this._motionDataGroups.filter((item) => {
-            if (item === lastMotionGroup || item.batch_id === lastMotionGroup.batch_id) {
+            if (item === lastMotionGroup || this._sameBatch(item, lastMotionGroup)) {
               return true
             }
             item.player?.destroy()
@@ -469,11 +515,16 @@ export class Processor {
                   lastMotionGroup: innerLastMotion,
                 } = option
                 if (innerEndOfBatch) {
-                  const { batch_id, player } =
-                    innerLastMotion as IAvatarMotionGroup
+                  const endedGroup = innerLastMotion as IAvatarMotionGroup
+                  const { batch_id, batch_name, player } = endedGroup
                   this.ee.emit(PlayerEventTypes.Player_EndSpeaking, player)
                   this._motionDataGroups = this._motionDataGroups.filter(
-                    (item) => item.batch_id! > batch_id!,
+                    (item) => {
+                      if (batch_name && item.batch_name) {
+                        return item.batch_name !== batch_name
+                      }
+                      return item.batch_id! > batch_id!
+                    },
                   )
                   if (
                     this._motionDataGroups.length &&
@@ -499,26 +550,6 @@ export class Processor {
           })
         }
       }
-      const shapeLength = shape.reduce(
-        (acc: number, cur: number) => acc * cur,
-        inputCodec === 'Int16' ? 2 : 4,
-      )
-      const audioBlobSliceStart = data_offset
-      const audioBlobSliceEnd = data_offset + shapeLength
-      const audioBlob = bin.slice(audioBlobSliceStart, audioBlobSliceEnd)
-      const audioArrayBuffer = await readBlobBytes(audioBlob)
-      // 如果前一段还没播放结束，后一段已接收到，那么后一段则不能自动播放
-      const prevHasPlayerMotionDataGroup = this._motionDataGroups.find(
-        (item) => item.player,
-      )
-      if (
-        this._motionDataGroups.length &&
-        lastMotionGroup.player &&
-        prevHasPlayerMotionDataGroup &&
-        prevHasPlayerMotionDataGroup.player !== lastMotionGroup.player
-      ) {
-        lastMotionGroup.player.autoPlay = false
-      }
       if (lastMotionGroup.player) {
         lastMotionGroup.player.feed({
           audio: new TargetTypedArray(audioArrayBuffer),
@@ -529,7 +560,7 @@ export class Processor {
       // 特殊事件motion挂上这个
       prevMotionGroup &&
       prevMotionGroup.player &&
-      lastMotionGroup.batch_id === prevMotionGroup.batch_id
+      this._sameBatch(lastMotionGroup, prevMotionGroup)
     ) {
       lastMotionGroup.player = prevMotionGroup.player
     }
@@ -550,13 +581,20 @@ export class Processor {
         this._arkit_face_sample_rate = sample_rate
       }
       if (lastMotionGroup.arkitFaceArrayBufferArray === undefined) {
-        if (
+        const existingSameBatch =
           prevMotionGroup &&
           prevMotionGroup.arkitFaceArrayBufferArray &&
-          prevMotionGroup.batch_id === lastMotionGroup.batch_id
-        ) {
+          this._sameBatch(prevMotionGroup, lastMotionGroup)
+            ? prevMotionGroup
+            : this._motionDataGroups.find(
+                (item) =>
+                  item !== lastMotionGroup &&
+                  item.arkitFaceArrayBufferArray &&
+                  this._sameBatch(item, lastMotionGroup),
+              )
+        if (existingSameBatch && existingSameBatch.arkitFaceArrayBufferArray) {
           lastMotionGroup.arkitFaceArrayBufferArray =
-            prevMotionGroup.arkitFaceArrayBufferArray
+            existingSameBatch.arkitFaceArrayBufferArray
         } else {
           lastMotionGroup.arkitFaceArrayBufferArray = []
         }
@@ -572,7 +610,7 @@ export class Processor {
     } else if (
       prevMotionGroup &&
       prevMotionGroup.arkitFaceArrayBufferArray &&
-      lastMotionGroup.batch_id === prevMotionGroup.batch_id
+      this._sameBatch(lastMotionGroup, prevMotionGroup)
     ) {
       lastMotionGroup.arkitFaceArrayBufferArray =
         prevMotionGroup.arkitFaceArrayBufferArray
@@ -669,7 +707,8 @@ export class Processor {
       lastMotionGroup.batch_name &&
       lastMotionGroup.batch_name === this._interruptedBatchName
     ) {
-      this._motionDataGroups.pop()
+      const idx = this._motionDataGroups.indexOf(lastMotionGroup)
+      if (idx !== -1) this._motionDataGroups.splice(idx, 1)
       return false
     }
     if (
@@ -679,7 +718,8 @@ export class Processor {
       (!lastMotionGroup.batch_name ||
         lastMotionGroup.batch_name === this._interruptedBatchName)
     ) {
-      this._motionDataGroups.pop()
+      const idx = this._motionDataGroups.indexOf(lastMotionGroup)
+      if (idx !== -1) this._motionDataGroups.splice(idx, 1)
       batchCheckResult = false
     }
     return batchCheckResult

@@ -61,7 +61,7 @@ class ImageUtils:
 
         # 将 NumPy 数组转换为 PIL 图像对象
         image = PIL.Image.fromarray(np.squeeze(video_frame)[..., ::-1])
-        max_dim = 512
+        max_dim = 384
         if max(image.size) > max_dim:
             image.thumbnail((max_dim, max_dim))
 
@@ -69,7 +69,7 @@ class ImageUtils:
         buffered = BytesIO()
 
         # 将图像保存到内存缓冲区中
-        save_kwargs = {"quality": 80} if format.upper() == "JPEG" else {}
+        save_kwargs = {"quality": 72} if format.upper() == "JPEG" else {}
         image.save(buffered, format=format, **save_kwargs)
 
         # 获取二进制数据并编码为 Base64

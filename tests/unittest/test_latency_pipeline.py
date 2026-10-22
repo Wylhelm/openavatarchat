@@ -126,6 +126,24 @@ class TestTTSFirstClauseSegmentation(unittest.TestCase):
         self.assertEqual(segments, ["Oui, c'est prêt."])
         self.assertEqual(rem, "Et voici la suite.")
 
+    def test_long_subsequent_sentence_splits_into_sub_clauses(self):
+        text = (
+            "à 6h55, le robot quitte sa base dans le salon, suit son plan de navigation "
+            "jusqu'à ta chambre, s'arrête au pied du lit et commence à te parler en douceur. "
+            "Il ajuste ensuite son volume."
+        )
+        segments, rem = extract_tts_segments(text, first_chunk_sent=True)
+        self.assertGreaterEqual(len(segments), 2)
+        for seg in segments:
+            self.assertLessEqual(len(seg), 150)
+        self.assertEqual(rem, "Il ajuste ensuite son volume.")
+
+    def test_short_introductory_colon_does_not_create_tiny_segment(self):
+        text = "Enfin, la discrétion : un robot qui roule la nuit doit être silencieux. Suite."
+        segments, rem = extract_tts_segments(text, first_chunk_sent=True)
+        self.assertTrue(segments[0].startswith("Enfin, la discrétion : un robot"))
+        self.assertEqual(rem, "Suite.")
+
     def test_fast_decode_wav_bytes(self):
         sr = 24000
         t = np.linspace(0, 0.2, int(sr * 0.2), endpoint=False, dtype=np.float32)
@@ -185,6 +203,10 @@ class TestStreamingASRHelpers(unittest.TestCase):
         self.assertEqual(
             _clean_whisper_hallucinations("Merci.", is_short_tail=False),
             "Merci.",
+        )
+        self.assertEqual(
+            _clean_whisper_hallucinations("...", is_short_tail=False),
+            "",
         )
 
 

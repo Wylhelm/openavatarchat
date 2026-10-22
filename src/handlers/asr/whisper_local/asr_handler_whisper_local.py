@@ -37,6 +37,9 @@ def _clean_whisper_hallucinations(text: str, is_short_tail: bool = False) -> str
     cleaned = text.strip()
     for pat in _WHISPER_HALLUCINATION_PATTERNS:
         cleaned = pat.sub("", cleaned).strip()
+    # Strip pure punctuation / ellipsis hallucinations (e.g. "...", ". . .")
+    if not re.search(r"\w", cleaned, flags=re.UNICODE):
+        return ""
     # On a short tail chunk after a pre-chunk, Whisper frequently hallucinates a lone "Merci." on breath noise
     if is_short_tail and re.fullmatch(r"merci[.!?…]*", cleaned, flags=re.IGNORECASE):
         return ""

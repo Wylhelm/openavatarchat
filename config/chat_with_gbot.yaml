@@ -34,14 +34,14 @@ default:
         start_delay: 2048
         # Silence (samples @ 16 kHz) before the turn is closed.
         # 9600 ≈ 0.6 s: short enough to answer quickly, long enough for a
-        # natural pause between sentences without clipping words.
+        # natural pause between clauses without splitting a sentence into two turns.
         end_delay: 9600
         buffer_look_back: 5000
         speech_padding: 1024
         barge_in_enabled: True
-        barge_in_threshold: 0.40
-        barge_in_start_delay: 1536
-        barge_in_min_rms: 0.005
+        barge_in_threshold: 0.45
+        barge_in_start_delay: 2048
+        barge_in_min_rms: 0.006
         prewarm_delay: 8000
       WhisperLocal:
         enabled: True
@@ -69,8 +69,9 @@ default:
         model_name: "gbot"
         history_length: 12
         enable_video_input: True # ensure your llm (the gbot bridge) supports image_url inputs
-        video_input_on_demand: False
-        voice_elaboration_enabled: True
+        video_input_on_demand: True
+        # Voice rules live in the OpenClaw bootstrap, not on each turn.
+        voice_elaboration_enabled: False
         # G-Bot system prompt is managed by the bridge
         system_prompt: ""
         api_url: "http://10.0.0.253:9000/v1"

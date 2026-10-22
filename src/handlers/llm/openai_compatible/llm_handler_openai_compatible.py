@@ -38,14 +38,7 @@ class LLMConfig(HandlerBaseConfigModel, BaseModel):
 
 
 _VOICE_ELABORATION_INSTRUCTION = (
-    "\n\n[CONSIGNE VOCALE PRIORITAIRE — REMPLACE TOUTE LIMITE DE 2-3 PHRASES : "
-    "Ton audio est streamé en temps réel dès la première phrase, donc faire une longue réponse "
-    "NE ralentit PAS ton délai de réponse initial. "
-    "Commence par une première phrase courte et naturelle (5 à 12 mots), puis dès que le sujet s'y prête "
-    "(question ouverte, projet, robotique, résumé, explication, conseil, idée, réflexion ou discussion), "
-    "DÉVELOPPE spontanément une réponse longue, riche, complète et détaillée de 5 à 8 phrases en style parlé fluide "
-    "(sans listes à puces ni markdown). Ne fais une réponse courte (1-2 phrases) QUE pour une simple salutation "
-    "ou confirmation rapide.]"
+    "\n[Style vocal: commence par 1 phrase courte (5-10 mots), puis développe naturellement en 4-6 phrases fluides si le sujet s'y prête, sans listes ni markdown.]"
 )
 
 
@@ -54,11 +47,12 @@ _VISUAL_QUERY_PATTERN = re.compile(
     r"regarde\w*|voi[rst]\w*|vu\b|yeux|oeil|"
     r"cam[eé]ra|webcam|photo|image|[eé]cran|"
     r"montre\w*|tiens|tient|main\w*|doigt\w*|"
-    r"porte\w*|habill\w*|v[eê]tement\w*|t-?shirt|chemise|pull|veste|manteau|"
+    r"porte\w*|habill\w*|v[eê]tement\w*|t-?shirt|chemise|chandail|pull|veste|manteau|"
     r"lunette\w*|casquette|chapeau|casque|cheveux|barbe|visage|t[eê]te|souri\w*|grimace|"
     r"air\b|trouves|ressemble\w*|couleur\w*|objet\w*|"
     r"derri[eè]re|devant|autour|fond|pi[eè]ce|chambre|bureau|salon|mur\w*|"
-    r"qu['\s]*est[- ]ce que c['\s]*est|qui est[- ]ce|"
+    r"celui[- ]ci|celui[- ]l[aà]|celle[- ]ci|celle[- ]l[aà]|ceci|"
+    r"qu['\s]*est[- ]ce que c['\s]*est|qui est[- ]ce|qu['\s]*est[- ]ce que j['\s]*ai|"
     r"look\w*|see\b|seeing|watch\w*|show\w*|holding|wearing|glasses|shirt|behind"
     r")\b",
     re.IGNORECASE | re.UNICODE,

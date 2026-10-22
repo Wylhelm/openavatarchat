@@ -28,9 +28,10 @@ const track_constraints = {
     : true,
 }
 
-// "disconnected" is a transient ICE state. Closing immediately dropped the
-// avatar during a long call whenever the link blipped.
-const DISCONNECT_GRACE_MS = 20000
+// "disconnected" and "failed" can be transient ICE states while the avatar is
+// still speaking over the motion WebSocket. Never tear down the 3D avatar renderer
+// mid-sentence while its audio Player is actively speaking.
+const DISCONNECT_GRACE_MS = 30000
 let disconnectGraceTimer: ReturnType<typeof setTimeout> | null = null
 
 function clearDisconnectGrace() {
@@ -314,7 +315,12 @@ export const useVideoChatStore = defineStore('videoChatStore', {
       if (disconnectGraceTimer !== null) return
       disconnectGraceTimer = setTimeout(() => {
         disconnectGraceTimer = null
-        if (this.peerConnection?.connectionState === 'disconnected') {
+        const state = this.peerConnection?.connectionState
+        if (state === 'disconnected' || state === 'failed') {
+          if (this.localAvatarRenderer?.curState === TYVoiceChatState.Responding) {
+            this.armDisconnectGrace()
+            return
+          }
           console.warn('WebRTC stayed disconnected, closing the avatar session')
           this.endLiveSession()
         }
@@ -353,12 +359,16 @@ export const useVideoChatStore = defineStore('videoChatStore', {
               this.streamState = StreamState.open
               break
             case 'disconnected':
-              console.warn('WebRTC disconnected, waiting to see if it recovers')
+            case 'failed':
+              console.warn(`WebRTC ${pc.connectionState}, waiting to see if it recovers`)
               this.armDisconnectGrace()
               break
-            case 'failed':
             case 'closed':
-              this.endLiveSession()
+              if (this.localAvatarRenderer?.curState === TYVoiceChatState.Responding) {
+                this.armDisconnectGrace()
+              } else {
+                this.endLiveSession()
+              }
               break
             default:
               break

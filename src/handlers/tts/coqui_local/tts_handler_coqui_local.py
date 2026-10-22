@@ -27,14 +27,63 @@ _FRENCH_HINGE_PATTERN = re.compile(
 )
 
 
+_SUB_CLAUSE_MAX_CHARS = 145
+
+
+def _split_long_sentence_for_tts(sentence: str, max_chars: int = _SUB_CLAUSE_MAX_CHARS) -> List[str]:
+    """
+    Break a very long sentence (>max_chars) at natural internal clause boundaries (commas,
+    semicolons, colons after >=45 chars, or French hinge conjunctions) so no single
+    Coqui XTTS call takes >2s, while keeping normal sentences intact for smooth prosody.
+    """
+    text = sentence.strip()
+    if len(text) <= max_chars:
+        return [text] if text else []
+
+    parts: List[str] = []
+    cur = text
+    while len(cur) > max_chars:
+        best_cut: Optional[Tuple[int, int]] = None
+        # 1) Look for comma / semicolon / colon in [50, max_chars]
+        for m in re.finditer(r"([,;:]+)\s+", cur):
+            pos = m.end(1)
+            if 50 <= pos <= max_chars and len(cur[m.end():].strip()) >= 25:
+                best_cut = (pos, m.end())
+        # 2) Look for French hinge conjunction in [55, max_chars]
+        if best_cut is None:
+            for m in _FRENCH_HINGE_PATTERN.finditer(cur):
+                pos = m.start()
+                if 55 <= pos <= max_chars and len(cur[m.end():].strip()) >= 25:
+                    best_cut = (pos, m.end())
+        # 3) Look for first comma/semicolon after max_chars if none before
+        if best_cut is None:
+            for m in re.finditer(r"([,;:]+)\s+", cur):
+                pos = m.end(1)
+                if pos > max_chars and len(cur[m.end():].strip()) >= 25:
+                    best_cut = (pos, m.end())
+                    break
+        if best_cut is None:
+            break
+        cut_idx, next_idx = best_cut
+        chunk = cur[:cut_idx].strip()
+        if chunk:
+            parts.append(chunk)
+        cur = cur[next_idx:].strip()
+
+    if cur:
+        parts.append(cur)
+    return parts
+
+
 def extract_tts_segments(buffer: str, first_chunk_sent: bool) -> Tuple[List[str], str]:
     """
     Adaptive two-speed segmentation for streaming LLM -> TTS:
     - First segment of a turn (first_chunk_sent=False): cuts on the earliest natural
       clause punctuation (>=3 words & >=18 chars, or terminal .!? with >=2 words),
       or on a French hinge conjunction once 8+ words have accumulated.
-    - Subsequent segments (first_chunk_sent=True): cuts on sentence endings (.!?;:)
-      or on commas after >=65 chars to preserve natural prosody.
+    - Subsequent segments (first_chunk_sent=True): cuts on sentence endings (.!?)
+      and subdivides long sentences (>110 chars) on natural commas/hinges so Coqui
+      never stalls for 3-4s on a 200-char sentence.
     """
     segments: List[str] = []
     remaining = buffer
@@ -71,7 +120,7 @@ def extract_tts_segments(buffer: str, first_chunk_sent: bool) -> Tuple[List[str]
                 cut_idx, next_idx = chosen_end
                 seg = remaining[:cut_idx].strip()
                 if seg:
-                    segments.append(seg)
+                    segments.extend(_split_long_sentence_for_tts(seg))
                     remaining = remaining[next_idx:]
                     is_first = False
                     continue
@@ -96,27 +145,33 @@ def extract_tts_segments(buffer: str, first_chunk_sent: bool) -> Tuple[List[str]
                         continue
             break
         else:
-            # Subsequent segments: prefer full sentences (. ! ? ; :), or comma if >= 65 chars
+            # Subsequent segments: cut on sentence endings (. ! ? ;), or colon if >= 45 chars,
+            # and split any sentence > 110 chars at natural internal commas/hinges.
             sent_match = None
             for m in re.finditer(r"([.!?;:。！？]+)\s+", remaining):
-                if len(remaining[:m.end(1)].strip()) >= 6:
+                prefix = remaining[:m.end(1)].strip()
+                punct = m.group(1)
+                # Avoid cutting on a short introductory colon (e.g. "Enfin, la discrétion :")
+                if ":" in punct and len(prefix) < 45:
+                    continue
+                if len(prefix) >= 6:
                     sent_match = m
                     break
             if sent_match:
                 cand = remaining[:sent_match.end(1)].strip()
-                segments.append(cand)
+                segments.extend(_split_long_sentence_for_tts(cand))
                 remaining = remaining[sent_match.end():]
                 continue
             if len(remaining) >= 65:
                 comma_match = None
-                for m in re.finditer(r"(,)\s+", remaining):
-                    if m.end(1) >= 55:
+                for m in re.finditer(r"([,;:])\s+", remaining):
+                    if m.end(1) >= 48:
                         comma_match = m
                         break
                 if comma_match is not None:
                     cand = remaining[:comma_match.end(1)].strip()
                     if cand:
-                        segments.append(cand)
+                        segments.extend(_split_long_sentence_for_tts(cand))
                         remaining = remaining[comma_match.end():]
                         continue
             break
@@ -320,10 +375,16 @@ class HandlerTTS(HandlerBase, ABC):
 
     def _synthesize(self, text: str, timeout: float = 60) -> np.ndarray:
         """Call the Coqui proxy and return float32 audio array shaped (1, samples)."""
+        synth_text = text.strip()
+        # Coqui XTTS-v2 hallucinates breath/trailing noise when a segment ends with ":" or ";" or ","
+        if synth_text and synth_text[-1] in ",;:":
+            synth_text = synth_text[:-1].rstrip() + "."
+        elif synth_text and synth_text[-1] not in ".!?。！？":
+            synth_text = synth_text + "."
         endpoint = f"{self.api_url}/v1/audio/speech"
         payload = {
             "model": "tts-1",
-            "input": text,
+            "input": synth_text,
             "voice": self.voice,
             "speaker": self.voice,
             "language": self.language,
@@ -422,6 +483,10 @@ class HandlerTTS(HandlerBase, ABC):
     def filter_text(self, text):
         if not text:
             return text
+        # Convert em-dashes, en-dashes, and ellipses to commas so prosodic pauses are preserved
+        text = re.sub(r"\s*[—–…]+\s*", ", ", text)
+        text = re.sub(r"[«»""]", '"', text)
+        text = re.sub(r"[‘’]", "'", text)
         filtered_text = re.sub(r'[^\w\s,.\-!?;:\'"()àáâãäåæçèéêëìíîïðñòóôõöøùúûüýþÿÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖØÙÚÛÜÝÞŸ，。！？]', '', text, flags=re.UNICODE)
         return filtered_text
 
@@ -482,22 +547,11 @@ class HandlerTTS(HandlerBase, ABC):
                     if clean_text and clean_text[-1] not in '.!?。！？':
                         clean_text += '.'
 
-                    max_chunk_length = 4000
-                    if len(clean_text) > max_chunk_length:
-                        chunks = re.split(r'([,.;:!?])\s+', clean_text)
-                        current_chunk = ""
-                        for i in range(0, len(chunks), 2):
-                            if i < len(chunks):
-                                part = chunks[i] + (chunks[i+1] if i+1 < len(chunks) else "")
-                                if len(current_chunk) + len(part) > max_chunk_length and current_chunk:
-                                    self._process_sentence_chunk(current_chunk.strip(), speech_id, output_definition, context)
-                                    current_chunk = part
-                                else:
-                                    current_chunk += part
-                        if current_chunk.strip():
-                            self._process_sentence_chunk(current_chunk.strip(), speech_id, output_definition, context)
-                    else:
-                        self._process_sentence_chunk(clean_text, speech_id, output_definition, context)
+                    for sub_chunk in _split_long_sentence_for_tts(clean_text):
+                        if self._is_aborted(context, speech_id):
+                            break
+                        if sub_chunk.strip():
+                            self._process_sentence_chunk(sub_chunk.strip(), speech_id, output_definition, context)
                 except Exception as e:
                     logger.error(f"Error in CoquiLocal TTS generation for final sentence '{context.input_text}': {e}", exc_info=True)
             context.input_text = ''
