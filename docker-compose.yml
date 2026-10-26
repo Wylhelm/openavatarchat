@@ -42,6 +42,7 @@ services:
       - ./src/handlers/asr/whisper_local/asr_handler_whisper_local.py:/root/open-avatar-chat/src/handlers/asr/whisper_local/asr_handler_whisper_local.py
       - ./src/handlers/llm/openai_compatible/llm_handler_openai_compatible.py:/root/open-avatar-chat/src/handlers/llm/openai_compatible/llm_handler_openai_compatible.py
       - ./src/handlers/tts/coqui_local/tts_handler_coqui_local.py:/root/open-avatar-chat/src/handlers/tts/coqui_local/tts_handler_coqui_local.py
+      - ./src/handlers/realtime_bridge:/root/open-avatar-chat/src/handlers/realtime_bridge
       - ./src/handlers/avatar/lam/avatar_handler_lam_audio2expression.py:/root/open-avatar-chat/src/handlers/avatar/lam/avatar_handler_lam_audio2expression.py
       - ./src/engine_utils/media_utils.py:/root/open-avatar-chat/src/engine_utils/media_utils.py
       - ./src/handlers/avatar/emotion:/root/open-avatar-chat/src/handlers/avatar/emotion

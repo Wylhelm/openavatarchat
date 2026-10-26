@@ -939,33 +939,33 @@ async def chat_completions(request: Request, api_key: str = Depends(verify_api_k
     return JSONResponse(content=make_openai_response(response_text))
 
 
-# ===== REALTIME FULL-DUPLEX VOICE BRIDGE =====
+# ===== REALTIME FULL-DUPLEX VOICE BRIDGE (HTTP streaming) =====
 #
 # When VOICE_MODE=realtime, the avatar engine streams raw mic audio to
-# /realtime/voice over a WebSocket. This bridge relays that audio to the OpenAI
-# Realtime API (semantic VAD + STT + expressive TTS). When the Realtime API
-# produces a transcription (a complete user turn), the bridge sends it to the
-# OpenClaw gateway (the avatar agent = brain + tools), receives the text reply,
-# and feeds that reply back into the Realtime API as a response, so the avatar
-# speaks it expressively. The resulting audio is streamed back to the engine.
+# /realtime/voice over HTTP (POST, newline-delimited JSON body). This bridge
+# relays that audio to the OpenAI Realtime API (semantic VAD + STT + expressive
+# TTS). When the Realtime API produces a complete user turn, the bridge sends
+# the transcript to the OpenClaw gateway (avatar agent = brain + tools),
+# receives the text reply, feeds it back into the Realtime API, and streams the
+# expressive audio back as newline-delimited JSON in the HTTP response.
 #
-# Wire protocol (engine <-> bridge), both JSON text frames:
-#   engine -> bridge:  {"type":"audio","audio_b64":"<base64 16-bit PCM 24kHz>"}
-#   bridge -> engine:  {"type":"audio","audio_b64":"..."}   # 24kHz PCM, playable
-#                      {"type":"text","text":"..."}          # transcript (debug)
-#                      {"type":"done"}
+# Wire protocol (engine <-> bridge), both newline-delimited JSON:
+#   engine -> bridge (request body):
+#     {"type":"audio","audio_b64":"<base64 16-bit PCM 24kHz>"}
+#   bridge -> engine (streamed response body):
+#     {"type":"audio","audio_b64":"..."}   # 24kHz PCM, playable
+#     {"type":"text","text":"..."}          # transcript (debug)
+#     {"type":"done"}
 
 
 class RealtimeVoiceSession:
     """One full-duplex voice session: OpenAI Realtime WS + OpenClaw gateway."""
 
-    def __init__(self, engine_ws):
-        self.engine_ws = engine_ws  # WebSocket to the avatar engine
+    def __init__(self):
         self.openai_ws = None
         self.openai_api_key = _load_openai_api_key()
-        self.transcript_parts: list[str] = []
-        self.audio_buf: list[str] = []  # base64 deltas for the current response
-        self.lock = asyncio.Lock()
+        self._out_audio: asyncio.Queue = asyncio.Queue()   # b64 audio -> engine
+        self._out_text: asyncio.Queue = asyncio.Queue()    # transcript -> engine
 
     async def _connect_openai(self):
         url = f"{REALTIME_URL}?model={REALTIME_MODEL}"
@@ -995,7 +995,6 @@ class RealtimeVoiceSession:
         }))
 
     async def send_audio(self, audio_b64: str):
-        """Append raw PCM audio to the Realtime input buffer."""
         if self.openai_ws is None:
             return
         await self.openai_ws.send(json.dumps({
@@ -1004,12 +1003,10 @@ class RealtimeVoiceSession:
         }))
 
     async def _on_transcript_done(self, transcript: str):
-        """A complete user turn was transcribed: ask the OpenClaw agent, then speak."""
         transcript = (transcript or "").strip()
         if not transcript:
             return
         log.info(f"[Realtime] User turn: '{transcript[:80]}...'")
-        # Run through the OpenClaw gateway (full brain + tools), non-blocking in a thread.
         reply = await asyncio.get_event_loop().run_in_executor(
             None, call_openclaw, transcript
         )
@@ -1017,7 +1014,6 @@ class RealtimeVoiceSession:
         if not reply:
             reply = "Désolé, je n'ai pas compris."
         log.info(f"[Realtime] Agent reply: '{reply[:80]}...'")
-        # Feed the text reply back into the Realtime API to generate expressive speech.
         await self.openai_ws.send(json.dumps({
             "type": "conversation.item.create",
             "item": {
@@ -1034,67 +1030,96 @@ class RealtimeVoiceSession:
     async def _handle_openai_event(self, msg: dict):
         etype = msg.get("type")
         if etype == "conversation.item.input_audio_transcription.completed":
-            # Full user turn transcribed -> route to OpenClaw agent.
-            t = msg.get("transcript", "")
-            await self._on_transcript_done(t)
+            await self._on_transcript_done(msg.get("transcript", ""))
         elif etype == "response.output_audio_transcript.delta":
             d = msg.get("delta", "")
             if d:
-                await self.engine_ws.send(json.dumps({"type": "text", "text": d}))
+                await self._out_text.put(d)
         elif etype == "response.output_audio.delta":
             d = msg.get("delta", "")
             if d:
-                await self.engine_ws.send(json.dumps({"type": "audio", "audio_b64": d}))
-        elif etype == "response.done":
-            await self.engine_ws.send(json.dumps({"type": "done"}))
+                await self._out_audio.put(d)
 
-    async def run(self):
-        """Main loop: relay engine audio -> OpenAI, and OpenAI events -> engine."""
-        await self._connect_openai()
-        await self._configure_session()
+    async def openai_reader(self):
+        async for raw in self.openai_ws:
+            try:
+                msg = json.loads(raw)
+            except Exception:
+                continue
+            try:
+                await self._handle_openai_event(msg)
+            except Exception as e:
+                log.error(f"[Realtime] event handler error: {e}")
 
-        async def openai_reader():
-            async for raw in self.openai_ws:
-                try:
-                    msg = json.loads(raw)
-                except Exception:
-                    continue
-                try:
-                    await self._handle_openai_event(msg)
-                except Exception as e:
-                    log.error(f"[Realtime] event handler error: {e}")
+    async def consume_engine_audio(self, audio_b64: str):
+        """Feed a chunk of engine mic audio into the Realtime buffer."""
+        await self.send_audio(audio_b64)
 
-        async def engine_reader():
-            async for raw in self.engine_ws:
-                try:
-                    msg = json.loads(raw)
-                except Exception:
-                    continue
-                if msg.get("type") == "audio":
-                    await self.send_audio(msg.get("audio_b64", ""))
-
-        # Run both readers; the session lives until either side closes.
-        await asyncio.gather(openai_reader(), engine_reader())
-
-
-@app.websocket("/realtime/voice")
-async def realtime_voice(engine_ws):
-    if VOICE_MODE != "realtime":
-        await engine_ws.close(code=1008, reason="realtime voice disabled")
-        return
-    if not _load_openai_api_key():
-        await engine_ws.close(code=1011, reason="OPENAI_API_KEY missing")
-        return
-    session = RealtimeVoiceSession(engine_ws)
-    try:
-        await session.run()
-    except Exception as e:
-        log.error(f"[Realtime] session error: {e}")
-    finally:
+    async def next_event(self) -> Optional[dict]:
+        """Return the next outbound event (audio/text) for the engine, or None."""
+        # Prefer audio; fall back to text only if no audio is pending.
         try:
-            await engine_ws.close()
-        except Exception:
+            audio = self._out_audio.get_nowait()
+            return {"type": "audio", "audio_b64": audio}
+        except asyncio.QueueEmpty:
             pass
+        try:
+            text = self._out_text.get_nowait()
+            return {"type": "text", "text": text}
+        except asyncio.QueueEmpty:
+            return None
+
+
+@app.post("/realtime/voice")
+async def realtime_voice(request: Request):
+    if VOICE_MODE != "realtime":
+        raise HTTPException(status_code=400, detail="realtime voice disabled")
+    if not _load_openai_api_key():
+        raise HTTPException(status_code=503, detail="OPENAI_API_KEY missing")
+
+    session = RealtimeVoiceSession()
+    await session._connect_openai()
+    await session._configure_session()
+
+    # Start the OpenAI WS reader as a background task.
+    reader_task = asyncio.ensure_future(session.openai_reader())
+
+    async def event_stream():
+        # Read the engine's NDJSON body line by line and feed audio in; then
+        # yield outbound events (audio/text) as they become available.
+        body = await request.body()
+        # Parse newline-delimited JSON from the request body.
+        for line in body.decode("utf-8", "ignore").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                msg = json.loads(line)
+            except Exception:
+                continue
+            if msg.get("type") == "audio":
+                await session.consume_engine_audio(msg.get("audio_b64", ""))
+
+        # Stream responses as they arrive (this keeps the HTTP response open).
+        try:
+            while True:
+                ev = await asyncio.wait_for(session.next_event(), timeout=0.25)
+                if ev is not None:
+                    yield json.dumps(ev) + "\n"
+        except asyncio.TimeoutError:
+            pass
+        finally:
+            reader_task.cancel()
+            try:
+                await session.openai_ws.close()
+            except Exception:
+                pass
+        yield json.dumps({"type": "done"}) + "\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="application/x-ndjson",
+    )
 
 
 if __name__ == "__main__":

@@ -47,7 +47,7 @@ default:
       RealtimeBridge:
         enabled: True
         module: realtime_bridge/realtime_bridge_handler
-        ws_url: "ws://10.0.0.253:9000/realtime/voice"
+        bridge_url: "http://10.0.0.253:9000/realtime/voice"
         input_sample_rate: 16000
         output_sample_rate: 24000
         output_frame_size: 480

@@ -1,32 +1,29 @@
 """
-RealtimeBridge handler — true full-duplex speech-to-speech via OpenAI Realtime API.
+RealtimeBridge handler — full-duplex speech-to-speech via OpenAI Realtime API.
 
-This handler replaces SileroVad + WhisperLocal + CoquiLocal with a single
-full-duplex audio bridge. The mic audio (MIC_AUDIO) is streamed verbatim to the
-avatar-bridge over a WebSocket; the bridge relays it to the OpenAI Realtime API
-(which does its own semantic VAD, transcription, and expressive TTS), runs the
-transcript through the OpenClaw gateway (the avatar agent's brain + tools), and
-streams the resulting expressive audio back. This handler emits that audio as
+Replaces SileroVad + WhisperLocal + CoquiLocal with a single expressive voice
+bridge. Raw mic audio (MIC_AUDIO) is streamed to the avatar-bridge over HTTP;
+the bridge relays it to the OpenAI Realtime API (semantic VAD + STT + expressive
+TTS), routes the transcript through the OpenClaw gateway (avatar agent brain +
+tools), and streams the expressive audio back. This handler emits that audio as
 AVATAR_AUDIO for the WebRTC player.
 
-Design goals:
-- Reversible: this is an ADDITION. SileroVad/Whisper/Coqui stay intact; enabling
-  this handler and disabling the other three in the yaml switches modes.
-- No local VAD: turn-taking is delegated to the Realtime API (semantic_vad),
-  which is what makes conversation feel natural (interruptions, backchannel).
-- Streaming: audio is sent in small chunks as it arrives, and received audio is
-  emitted as soon as deltas arrive, for low latency.
+Transport: HTTP streaming (requests), NOT a WebSocket client. This matches the
+existing Whisper/Coqui handlers (both use `requests`) and avoids adding a
+`websockets` dependency to the engine image — so no image rebuild is needed,
+only a bind-mount of this package + a container restart.
 
-The bridge exposes a single WebSocket endpoint:  ws://<bridge>/realtime/voice
-The wire protocol (both directions) is a JSON envelope:
-  { "type": "audio",  "audio_b64": "<base64 16-bit PCM mono 24kHz>" }
-  { "type": "end" }
-Server -> client:
-  { "type": "audio",  "audio_b64": "..." }     # 24kHz PCM mono, playable directly
-  { "type": "text",   "text": "..." }          # optional transcript (debug)
-  { "type": "done" }
+Wire protocol (engine <-> bridge), HTTP POST with newline-delimited JSON body:
+  engine -> bridge (request body, one JSON per line):
+    {"type":"audio","audio_b64":"<base64 16-bit PCM 24kHz>"}
+  bridge -> engine (streamed response body, one JSON per line):
+    {"type":"audio","audio_b64":"..."}   # 24kHz PCM, playable
+    {"type":"text","text":"..."}         # transcript (debug)
+    {"type":"done"}
+
+Reversible: this is an ADDITION. SileroVad/Whisper/Coqui stay intact; enabling
+this handler and disabling the other three in the yaml switches modes.
 """
-import asyncio
 import base64
 import json
 import threading
@@ -34,7 +31,7 @@ from abc import ABC
 from typing import Dict, Optional, cast
 
 import numpy as np
-import websockets
+import requests
 from loguru import logger
 from pydantic import BaseModel, Field
 
@@ -46,21 +43,21 @@ from chat_engine.data_models.chat_data_type import ChatDataType
 from chat_engine.data_models.chat_engine_config_data import ChatEngineConfigModel, HandlerBaseConfigModel
 from chat_engine.data_models.runtime_data.data_bundle import DataBundle, DataBundleDefinition, DataBundleEntry
 
-# Realtime API input/output is 24kHz mono 16-bit PCM.
+# OpenAI Realtime input/output is 24kHz mono 16-bit PCM.
 REALTIME_SAMPLE_RATE = 24000
 
 
 class RealtimeBridgeConfig(HandlerBaseConfigModel, BaseModel):
-    ws_url: str = Field(default="ws://10.0.0.253:9000/realtime/voice")
+    bridge_url: str = Field(default="http://10.0.0.253:9000/realtime/voice")
     # Mic arrives at 16kHz (WebRTC input); we upsample to 24kHz for Realtime.
     input_sample_rate: int = Field(default=16000)
     output_sample_rate: int = Field(default=24000)
     # Emit output audio in frames of this many samples (480 == 20ms @ 24kHz).
     output_frame_size: int = Field(default=480)
-    # Reconnect backoff when the bridge WebSocket drops.
-    reconnect_delay_seconds: float = Field(default=1.0)
-    # Max audio samples to buffer before flushing to the bridge (2400 == 100ms @ 24kHz).
+    # Max audio samples buffered before flushing a chunk to the bridge (2400 == 100ms @ 24kHz).
     chunk_samples: int = Field(default=2400)
+    # HTTP request timeout for the streaming POST (seconds). Long-lived connection.
+    request_timeout: float = Field(default=3600.0)
 
 
 class RealtimeBridgeContext(HandlerContext):
@@ -68,22 +65,28 @@ class RealtimeBridgeContext(HandlerContext):
         super().__init__(session_id)
         self.config: Optional[RealtimeBridgeConfig] = None
         self.shared_states = None
-        # WebSocket + worker loop (run in a background thread)
-        self.ws: Optional[websockets.WebSocketClientProtocol] = None
-        self.loop: Optional[asyncio.AbstractEventLoop] = None
+        # Worker thread that owns the streaming HTTP connection.
         self.thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
-        # Outbound queue: audio chunks (bytes) pushed from handle(), drained by worker.
-        self._outbound: asyncio.Queue = None  # set in worker thread
+        # Outbound audio chunks (bytes) pushed from handle(), drained by the worker.
+        self._outbound: list = []          # guarded by _outbound_lock
+        self._outbound_lock = threading.Lock()
+        self._outbound_cv = threading.Condition(self._outbound_lock)
         self._connected = threading.Event()
-        # Resampler (16k -> 24k) — simple linear interp; avoids librosa dependency here.
-        self._resample_ratio = REALTIME_SAMPLE_RATE / 16000
 
 
 class HandlerRealtimeBridge(HandlerBase, ABC):
     def __init__(self):
         super().__init__()
         self.config: Optional[RealtimeBridgeConfig] = None
+        self._thread_local = threading.local()
+
+    def _get_http_session(self) -> requests.Session:
+        session = getattr(self._thread_local, "session", None)
+        if session is None:
+            session = requests.Session()
+            self._thread_local.session = session
+        return session
 
     def get_handler_info(self) -> HandlerBaseInfo:
         return HandlerBaseInfo(
@@ -93,7 +96,7 @@ class HandlerRealtimeBridge(HandlerBase, ABC):
 
     def load(self, engine_config: ChatEngineConfigModel, handler_config: Optional[BaseModel] = None):
         self.config = cast(RealtimeBridgeConfig, handler_config)
-        logger.info(f"RealtimeBridge handler loaded: ws_url='{self.config.ws_url}'")
+        logger.info(f"RealtimeBridge handler loaded: bridge_url='{self.config.bridge_url}'")
 
     def create_context(self, session_context: SessionContext, handler_config=None) -> HandlerContext:
         context = RealtimeBridgeContext(session_context.session_info.session_id)
@@ -103,22 +106,11 @@ class HandlerRealtimeBridge(HandlerBase, ABC):
 
     def start_context(self, session_context: SessionContext, handler_context: HandlerContext):
         context = cast(RealtimeBridgeContext, handler_context)
-        context.loop = asyncio.new_event_loop()
-        context._outbound = asyncio.Queue()
-
-        def run():
-            asyncio.set_event_loop(context.loop)
-            context.loop.run_until_complete(self._worker(context))
-
-        context.thread = threading.Thread(target=run, daemon=True)
+        context.thread = threading.Thread(target=self._worker, args=(context,), daemon=True)
         context.thread.start()
         logger.info("RealtimeBridge worker thread started")
 
     def get_handler_detail(self, session_context: SessionContext, context: HandlerContext) -> HandlerDetail:
-        # Input: raw mic audio (no VAD). Output: expressive avatar audio.
-        input_def = DataBundleDefinition()
-        input_def.add_entry(DataBundleEntry.create_audio_entry("mic_audio", 1, self.config.input_sample_rate))
-
         output_def = DataBundleDefinition()
         output_def.add_entry(DataBundleEntry.create_audio_entry(
             "avatar_audio", 1, self.config.output_sample_rate))
@@ -128,64 +120,74 @@ class HandlerRealtimeBridge(HandlerBase, ABC):
             type=ChatDataType.AVATAR_AUDIO, definition=output_def)}
         return HandlerDetail(inputs=inputs, outputs=outputs)
 
-    # ---- worker (background thread): WS connect + outbound drain + inbound emit ----
+    # ---- worker: long-lived streaming HTTP POST, drain outbound + emit inbound ----
 
-    async def _worker(self, context: RealtimeBridgeContext):
-        outbound = context._outbound
+    def _worker(self, context: RealtimeBridgeContext):
+        """Maintain a streaming POST to the bridge; send mic audio, read avatar audio."""
         while not context._stop.is_set():
             try:
-                logger.info(f"RealtimeBridge connecting to {context.config.ws_url} ...")
-                async with websockets.connect(context.config.ws_url, max_size=None) as ws:
-                    context.ws = ws
-                    context._connected.set()
-                    logger.info("RealtimeBridge WebSocket connected")
-                    await self._run_loop(context, ws, outbound)
+                self._stream_loop(context)
             except Exception as e:
-                logger.warning(f"RealtimeBridge WS error: {e}; reconnect in {context.config.reconnect_delay_seconds}s")
+                logger.warning(f"RealtimeBridge stream error: {e}; reconnecting...")
                 context._connected.clear()
             finally:
                 context._connected.clear()
-                context.ws = None
             if not context._stop.is_set():
-                await asyncio.sleep(context.config.reconnect_delay_seconds)
+                context._stop.wait(timeout=1.0)
 
-    async def _run_loop(self, context: RealtimeBridgeContext, ws, outbound: asyncio.Queue):
-        """Simultaneously drain outbound mic audio and read inbound avatar audio."""
-        async def drain_outbound():
+    def _stream_loop(self, context: RealtimeBridgeContext):
+        session = self._get_http_session()
+        logger.info(f"RealtimeBridge connecting to {context.config.bridge_url} ...")
+
+        # Generator yields audio chunks as they arrive; requests streams the body.
+        def body_gen():
             while not context._stop.is_set():
-                try:
-                    chunk = await asyncio.wait_for(outbound.get(), timeout=0.2)
-                except asyncio.TimeoutError:
-                    continue
+                chunk = self._pop_chunk(context, timeout=0.5)
                 if chunk is None:
-                    # sentinel: end of utterance (not used now; audio is continuous)
+                    # keepalive: send a comment line to keep the connection alive
                     continue
-                await ws.send(json.dumps({"type": "audio", "audio_b64": chunk}))
+                yield json.dumps({"type": "audio", "audio_b64": chunk}) + "\n"
 
-        async def read_inbound():
-            async for raw in ws:
+        with session.post(
+            context.config.bridge_url,
+            data=body_gen(),
+            headers={"Content-Type": "application/x-ndjson"},
+            stream=True,
+            timeout=context.config.request_timeout,
+        ) as resp:
+            resp.raise_for_status()
+            context._connected.set()
+            logger.info("RealtimeBridge HTTP stream connected")
+            # Read newline-delimited JSON events from the bridge.
+            for line in resp.iter_lines(decode_unicode=True):
                 if context._stop.is_set():
                     break
+                if not line:
+                    continue
                 try:
-                    msg = json.loads(raw)
+                    msg = json.loads(line)
                 except Exception:
                     continue
-                mtype = msg.get("type")
-                if mtype == "audio":
-                    self._emit_audio(context, msg.get("audio_b64", ""))
-                elif mtype == "text":
-                    logger.debug(f"RealtimeBridge transcript: {msg.get('text', '')}")
-                elif mtype == "done":
-                    pass
+                self._handle_bridge_event(context, msg)
 
-        # Run both concurrently; exit when either the stop flag is set or WS closes.
-        await asyncio.gather(
-            drain_outbound(),
-            read_inbound(),
-        )
+    def _pop_chunk(self, context: RealtimeBridgeContext, timeout: float) -> Optional[str]:
+        with context._outbound_cv:
+            if not context._outbound:
+                context._outbound_cv.wait(timeout=timeout)
+            if not context._outbound:
+                return None
+            return context._outbound.pop(0)
+
+    def _handle_bridge_event(self, context: RealtimeBridgeContext, msg: dict):
+        mtype = msg.get("type")
+        if mtype == "audio":
+            self._emit_audio(context, msg.get("audio_b64", ""))
+        elif mtype == "text":
+            logger.debug(f"RealtimeBridge transcript: {msg.get('text', '')}")
+        elif mtype == "done":
+            pass
 
     def _emit_audio(self, context: RealtimeBridgeContext, audio_b64: str):
-        """Decode 24kHz PCM audio from the bridge and submit as AVATAR_AUDIO."""
         if not audio_b64:
             return
         try:
@@ -195,14 +197,11 @@ class HandlerRealtimeBridge(HandlerBase, ABC):
         audio = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
         if audio.size == 0:
             return
-        # Emit in frame-size chunks
         frame = context.config.output_frame_size
         for i in range(0, audio.size, frame):
             chunk = audio[i:i + frame]
             if chunk.size == 0:
                 continue
-            data = DataBundle(None)
-            # build a fresh definition each emit (cheap) to carry the audio
             definition = DataBundleDefinition()
             definition.add_entry(DataBundleEntry.create_audio_entry(
                 "avatar_audio", 1, context.config.output_sample_rate))
@@ -213,7 +212,7 @@ class HandlerRealtimeBridge(HandlerBase, ABC):
             chat_data = ChatData(type=ChatDataType.AVATAR_AUDIO, data=bundle)
             context.submit_data(chat_data)
 
-    # ---- handle(): receive mic audio, resample to 24k, push to outbound ----
+    # ---- handle(): receive mic audio, resample 24k, push to outbound ----
 
     def handle(self, context: HandlerContext, inputs: ChatData,
                output_definitions: Dict[ChatDataType, HandlerDataInfo]):
@@ -221,7 +220,6 @@ class HandlerRealtimeBridge(HandlerBase, ABC):
         if inputs.type != ChatDataType.MIC_AUDIO:
             return
         if not context._connected.is_set():
-            # Bridge not ready; drop (or could buffer). Dropping is safest for latency.
             return
         audio = inputs.data.get_main_data()
         if audio is None:
@@ -229,23 +227,17 @@ class HandlerRealtimeBridge(HandlerBase, ABC):
         audio = audio.squeeze()
         if audio.size == 0:
             return
-        # Normalize to float32 [-1, 1]
         if audio.dtype != np.float32:
             audio = audio.astype(np.float32) / 32768.0
-        # Resample 16k -> 24k (linear interpolation)
         resampled = self._resample(audio, 16000, REALTIME_SAMPLE_RATE)
-        # Convert to int16 PCM
         pcm = np.clip(resampled * 32767.0, -32768, 32767).astype(np.int16)
         b64 = base64.b64encode(pcm.tobytes()).decode()
-        # Push to worker (non-blocking; if queue full, drop oldest to stay real-time)
-        try:
-            context._outbound.put_nowait(b64)
-        except asyncio.QueueFull:
-            logger.debug("RealtimeBridge outbound queue full, dropping chunk")
+        with context._outbound_cv:
+            context._outbound.append(b64)
+            context._outbound_cv.notify_all()
 
     @staticmethod
     def _resample(audio: np.ndarray, src_sr: int, dst_sr: int) -> np.ndarray:
-        """Linear-interpolation resampler (16k -> 24k). Accurate enough for speech."""
         if src_sr == dst_sr:
             return audio
         n_out = int(round(audio.size * dst_sr / src_sr))
@@ -256,11 +248,6 @@ class HandlerRealtimeBridge(HandlerBase, ABC):
     def destroy_context(self, context: HandlerContext):
         context = cast(RealtimeBridgeContext, context)
         context._stop.set()
-        if context.loop is not None:
-            try:
-                context.loop.call_soon_threadsafe(context.loop.stop)
-            except Exception:
-                pass
         if context.thread is not None:
             context.thread.join(timeout=2.0)
         logger.info("RealtimeBridge context destroyed")
