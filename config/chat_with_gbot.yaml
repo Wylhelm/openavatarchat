@@ -29,6 +29,7 @@ default:
         # which dropped the avatar until Start was clicked again.
         connection_ttl: 86400
       SileroVad:
+        enabled: False
         module: vad/silerovad/vad_handler_silero
         speaking_threshold: 0.3
         start_delay: 2048
@@ -43,8 +44,17 @@ default:
         barge_in_start_delay: 2048
         barge_in_min_rms: 0.006
         prewarm_delay: 8000
-      WhisperLocal:
+      RealtimeBridge:
         enabled: True
+        module: realtime_bridge/realtime_bridge_handler
+        ws_url: "ws://10.0.0.253:9000/realtime/voice"
+        input_sample_rate: 16000
+        output_sample_rate: 24000
+        output_frame_size: 480
+        reconnect_delay_seconds: 1.0
+        chunk_samples: 2400
+      WhisperLocal:
+        enabled: False
         module: asr/whisper_local/asr_handler_whisper_local
         api_url: "http://10.0.0.175:9400"
         language: "fr"
@@ -55,7 +65,7 @@ default:
         streaming_max_chunk_seconds: 8.0
         trailing_silence_pad_seconds: 0.5
       CoquiLocal:
-        enabled: True
+        enabled: False
         module: tts/coqui_local/tts_handler_coqui_local
         api_url: "http://10.0.0.175:8200"
         voice: "Chandra MacFarland"
@@ -63,7 +73,6 @@ default:
         warmup_enabled: True
         warmup_timeout: 15
       LLMOpenAICompatible:
-        max_tokens: 800
         enabled: True
         module: llm/openai_compatible/llm_handler_openai_compatible
         model_name: "gbot"

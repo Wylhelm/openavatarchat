@@ -42,6 +42,30 @@ LLM_MODE = os.environ.get("LLM_MODE", "openclaw")
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://10.0.0.175:11434")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "nemotron-3-super:cloud")
 
+# === Realtime full-duplex voice (OpenAI Realtime API) ===
+# Optional bridge. When enabled, the avatar engine streams raw mic audio to
+# /realtime/voice; the bridge relays it to OpenAI Realtime (semantic VAD + STT +
+# expressive TTS), runs the transcript through the OpenClaw gateway, and streams
+# the expressive audio back. The existing /v1/chat/completions (text) path is
+# untouched and remains the default.
+VOICE_MODE = os.environ.get("VOICE_MODE", "coqui")  # "coqui" (default) | "realtime"
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+REALTIME_MODEL = os.environ.get("REALTIME_MODEL", "gpt-realtime-2.1-mini")
+REALTIME_VOICE = os.environ.get("REALTIME_VOICE", "marin")
+REALTIME_URL = os.environ.get("REALTIME_URL", "wss://api.openai.com/v1/realtime")
+
+
+def _load_openai_api_key() -> str:
+    """Resolve the OpenAI API key from env, or fall back to the openclaw secrets file."""
+    if OPENAI_API_KEY:
+        return OPENAI_API_KEY
+    p = os.path.expanduser("~/.openclaw/secrets/openai-api-key")
+    try:
+        with open(p) as f:
+            return f.read().strip()
+    except Exception:
+        return ""
+
 GATEWAY_URL = os.environ.get("OPENCLAW_GATEWAY_URL", "ws://localhost:18789")
 OPENCLAW_CONFIG_PATH = os.environ.get("OPENCLAW_CONFIG_PATH", os.path.expanduser("~/.openclaw/openclaw.json"))
 OPENCLAW_DIR = os.path.dirname(OPENCLAW_CONFIG_PATH)
@@ -913,6 +937,164 @@ async def chat_completions(request: Request, api_key: str = Depends(verify_api_k
             media_type="text/event-stream",
         )
     return JSONResponse(content=make_openai_response(response_text))
+
+
+# ===== REALTIME FULL-DUPLEX VOICE BRIDGE =====
+#
+# When VOICE_MODE=realtime, the avatar engine streams raw mic audio to
+# /realtime/voice over a WebSocket. This bridge relays that audio to the OpenAI
+# Realtime API (semantic VAD + STT + expressive TTS). When the Realtime API
+# produces a transcription (a complete user turn), the bridge sends it to the
+# OpenClaw gateway (the avatar agent = brain + tools), receives the text reply,
+# and feeds that reply back into the Realtime API as a response, so the avatar
+# speaks it expressively. The resulting audio is streamed back to the engine.
+#
+# Wire protocol (engine <-> bridge), both JSON text frames:
+#   engine -> bridge:  {"type":"audio","audio_b64":"<base64 16-bit PCM 24kHz>"}
+#   bridge -> engine:  {"type":"audio","audio_b64":"..."}   # 24kHz PCM, playable
+#                      {"type":"text","text":"..."}          # transcript (debug)
+#                      {"type":"done"}
+
+
+class RealtimeVoiceSession:
+    """One full-duplex voice session: OpenAI Realtime WS + OpenClaw gateway."""
+
+    def __init__(self, engine_ws):
+        self.engine_ws = engine_ws  # WebSocket to the avatar engine
+        self.openai_ws = None
+        self.openai_api_key = _load_openai_api_key()
+        self.transcript_parts: list[str] = []
+        self.audio_buf: list[str] = []  # base64 deltas for the current response
+        self.lock = asyncio.Lock()
+
+    async def _connect_openai(self):
+        url = f"{REALTIME_URL}?model={REALTIME_MODEL}"
+        headers = {"Authorization": f"Bearer {self.openai_api_key}"}
+        self.openai_ws = await websockets.connect(url, additional_headers=headers)
+        log.info(f"[Realtime] Connected to {REALTIME_MODEL}")
+
+    async def _configure_session(self):
+        await self.openai_ws.send(json.dumps({
+            "type": "session.update",
+            "session": {
+                "type": "realtime",
+                "output_modalities": ["audio"],
+                "audio": {
+                    "input": {
+                        "format": {"type": "audio/pcm", "rate": 24000},
+                        "turn_detection": {"type": "semantic_vad"},
+                        "transcription": {"model": "gpt-transcribe"},
+                    },
+                    "output": {
+                        "format": {"type": "audio/pcm", "rate": 24000},
+                        "voice": REALTIME_VOICE,
+                    },
+                },
+                "instructions": "Tu es G-Bot, l'assistant vocal de Guillaume. Réponds en français, de façon naturelle, expressive et chaleureuse. Phrases courtes et parlées, pas de markdown.",
+            },
+        }))
+
+    async def send_audio(self, audio_b64: str):
+        """Append raw PCM audio to the Realtime input buffer."""
+        if self.openai_ws is None:
+            return
+        await self.openai_ws.send(json.dumps({
+            "type": "input_audio_buffer.append",
+            "audio": audio_b64,
+        }))
+
+    async def _on_transcript_done(self, transcript: str):
+        """A complete user turn was transcribed: ask the OpenClaw agent, then speak."""
+        transcript = (transcript or "").strip()
+        if not transcript:
+            return
+        log.info(f"[Realtime] User turn: '{transcript[:80]}...'")
+        # Run through the OpenClaw gateway (full brain + tools), non-blocking in a thread.
+        reply = await asyncio.get_event_loop().run_in_executor(
+            None, call_openclaw, transcript
+        )
+        reply = (reply or "").strip()
+        if not reply:
+            reply = "Désolé, je n'ai pas compris."
+        log.info(f"[Realtime] Agent reply: '{reply[:80]}...'")
+        # Feed the text reply back into the Realtime API to generate expressive speech.
+        await self.openai_ws.send(json.dumps({
+            "type": "conversation.item.create",
+            "item": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "input_text", "text": reply}],
+            },
+        }))
+        await self.openai_ws.send(json.dumps({
+            "type": "response.create",
+            "response": {"output_modalities": ["audio"]},
+        }))
+
+    async def _handle_openai_event(self, msg: dict):
+        etype = msg.get("type")
+        if etype == "conversation.item.input_audio_transcription.completed":
+            # Full user turn transcribed -> route to OpenClaw agent.
+            t = msg.get("transcript", "")
+            await self._on_transcript_done(t)
+        elif etype == "response.output_audio_transcript.delta":
+            d = msg.get("delta", "")
+            if d:
+                await self.engine_ws.send(json.dumps({"type": "text", "text": d}))
+        elif etype == "response.output_audio.delta":
+            d = msg.get("delta", "")
+            if d:
+                await self.engine_ws.send(json.dumps({"type": "audio", "audio_b64": d}))
+        elif etype == "response.done":
+            await self.engine_ws.send(json.dumps({"type": "done"}))
+
+    async def run(self):
+        """Main loop: relay engine audio -> OpenAI, and OpenAI events -> engine."""
+        await self._connect_openai()
+        await self._configure_session()
+
+        async def openai_reader():
+            async for raw in self.openai_ws:
+                try:
+                    msg = json.loads(raw)
+                except Exception:
+                    continue
+                try:
+                    await self._handle_openai_event(msg)
+                except Exception as e:
+                    log.error(f"[Realtime] event handler error: {e}")
+
+        async def engine_reader():
+            async for raw in self.engine_ws:
+                try:
+                    msg = json.loads(raw)
+                except Exception:
+                    continue
+                if msg.get("type") == "audio":
+                    await self.send_audio(msg.get("audio_b64", ""))
+
+        # Run both readers; the session lives until either side closes.
+        await asyncio.gather(openai_reader(), engine_reader())
+
+
+@app.websocket("/realtime/voice")
+async def realtime_voice(engine_ws):
+    if VOICE_MODE != "realtime":
+        await engine_ws.close(code=1008, reason="realtime voice disabled")
+        return
+    if not _load_openai_api_key():
+        await engine_ws.close(code=1011, reason="OPENAI_API_KEY missing")
+        return
+    session = RealtimeVoiceSession(engine_ws)
+    try:
+        await session.run()
+    except Exception as e:
+        log.error(f"[Realtime] session error: {e}")
+    finally:
+        try:
+            await engine_ws.close()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
