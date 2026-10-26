@@ -46,6 +46,8 @@ GATEWAY_URL = os.environ.get("OPENCLAW_GATEWAY_URL", "ws://localhost:18789")
 OPENCLAW_CONFIG_PATH = os.environ.get("OPENCLAW_CONFIG_PATH", os.path.expanduser("~/.openclaw/openclaw.json"))
 OPENCLAW_DIR = os.path.dirname(OPENCLAW_CONFIG_PATH)
 IDENTITY_PATH = os.path.join(OPENCLAW_DIR, "agents/avatar/device-identity.json")
+# trusted-proxy gateway expects the Cloudflare Access identity header for loopback clients
+TRUSTED_PROXY_USER_EMAIL = os.environ.get("OPENCLAW_TRUSTED_PROXY_USER_EMAIL", "gagnongui@gmail.com")
 SESSION_KEY_FILE = os.path.join(OPENCLAW_DIR, "agents/avatar/current_session_key.txt")
 
 
@@ -166,7 +168,9 @@ def load_or_generate_identity() -> dict:
 def load_gateway_token() -> str:
     with open(OPENCLAW_CONFIG_PATH) as f:
         config = json.load(f)
-    token = config["gateway"]["auth"]["token"]
+    auth = config["gateway"]["auth"]
+    # trusted-proxy mode has no `token`; the loopback fallback is `password`
+    token = auth.get("token") or auth.get("password")
     # Newer OpenClaw configs store token as a dict reference to a secrets file
     if isinstance(token, dict):
         token_id = token.get("id", "")  # e.g. "/gateway/auth/token"
@@ -248,7 +252,10 @@ class GatewayManager:
         # Challenge → sign & respond
         if event == "connect.challenge":
             nonce = payload.get("nonce", "")
-            sig, signed_at = sign_challenge(self.identity, self.gateway_token, nonce)
+            # The gateway rebuilds the signature payload with `token = null` (it only
+            # reads auth.token/deviceToken/bootstrapToken, never auth.password), so
+            # sign with an empty token even though we authenticate via auth.password.
+            sig, signed_at = sign_challenge(self.identity, "", nonce)
             connect_msg = {
                 "type": "req", "id": "conn_1", "method": "connect",
                 "params": {
@@ -256,7 +263,7 @@ class GatewayManager:
                     "client": {"id": "cli", "version": "1.0.0", "platform": "python", "mode": "cli"},
                     "role": "operator",
                     "scopes": ["operator.read", "operator.write"],
-                    "auth": {"token": self.gateway_token},
+                    "auth": {"password": self.gateway_token},
                     "device": {
                         "id": self.identity["deviceId"],
                         "publicKey": self.identity["publicKeyRawB64url"],
