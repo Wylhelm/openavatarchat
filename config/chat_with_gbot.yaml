@@ -47,7 +47,9 @@ default:
       RealtimeBridge:
         enabled: True
         module: realtime_bridge/realtime_bridge_handler
-        bridge_url: "http://10.0.0.253:9000/realtime/voice"
+        # WebSocket: full duplex is required (an HTTP POST cannot stream both ways).
+        bridge_url: "ws://10.0.0.253:9000/realtime/voice"
+        api_key: "${AVATAR_BRIDGE_API_KEY}"
         input_sample_rate: 16000
         output_sample_rate: 24000
         output_frame_size: 480
