@@ -91,6 +91,6 @@ default:
         api_key: "${AVATAR_BRIDGE_API_KEY}"
       LAM_Driver:
         module: avatar/lam/avatar_handler_lam_audio2expression
-        emotion_weight: 0.95 # 0 disables facial emotions from the [emotion] tag
+        emotion_weight: 1.15 # 0 disables facial emotions from the [emotion] tag; brows stay < 0.92 thanks to the soft-knee clamp
         emotion_ramp_seconds: 0.35
-        micro_expression_strength: 1.4 # brow lifts on stressed syllables + slow drift while speaking; 0 disables
+        micro_expression_strength: 1.7 # brow lifts on stressed syllables + slow drift while speaking; 0 disables
