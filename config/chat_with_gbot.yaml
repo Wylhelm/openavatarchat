@@ -55,6 +55,8 @@ default:
         output_frame_size: 480
         reconnect_delay_seconds: 1.0
         chunk_samples: 2400
+        # Camera frame sent to OpenClaw for visual questions (bridge: VISION_ON_DEMAND).
+        enable_video_input: True
       WhisperLocal:
         enabled: False
         module: asr/whisper_local/asr_handler_whisper_local

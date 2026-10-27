@@ -15,7 +15,9 @@ body before reading the response, so nothing ever came back.
 Wire protocol (engine <-> bridge), JSON text frames:
   engine -> bridge:
     {"type":"audio","audio_b64":"<base64 16-bit PCM 24kHz>"}
+    {"type":"image","id":"...","image_url":"data:image/jpeg;base64,..."|null}  # reply to image_request
   bridge -> engine:
+    {"type":"image_request","id":"..."}                     # latest camera frame, for vision turns
     {"type":"audio","audio_b64":"...","response_id":"..."}  # 24kHz PCM
     {"type":"audio_done","response_id":"..."}               # end of a reply
     {"type":"speech_started"}                               # user barge-in
@@ -32,6 +34,7 @@ from abc import ABC
 from typing import Dict, Optional, cast
 
 import numpy as np
+import PIL.Image  # noqa: F401  media_utils uses PIL.Image but only imports PIL
 from loguru import logger
 from pydantic import BaseModel, Field
 from websockets.exceptions import ConnectionClosed
@@ -44,6 +47,7 @@ from chat_engine.data_models.chat_data.chat_data_model import ChatData
 from chat_engine.data_models.chat_data_type import ChatDataType
 from chat_engine.data_models.chat_engine_config_data import ChatEngineConfigModel, HandlerBaseConfigModel
 from chat_engine.data_models.runtime_data.data_bundle import DataBundle, DataBundleDefinition, DataBundleEntry
+from engine_utils.media_utils import ImageUtils
 from handlers.avatar.emotion.emotion_arkit import NEUTRAL_EMOTION, canonical_emotion
 
 # OpenAI Realtime input/output is 24kHz mono 16-bit PCM.
@@ -64,6 +68,8 @@ class RealtimeBridgeConfig(HandlerBaseConfigModel, BaseModel):
     # Max audio samples buffered before flushing a chunk to the bridge (2400 == 100ms @ 24kHz).
     chunk_samples: int = Field(default=2400)
     reconnect_delay_seconds: float = Field(default=1.0)
+    # Keep the latest camera frame so the bridge can attach it to vision questions.
+    enable_video_input: bool = Field(default=True)
     connect_timeout: float = Field(default=10.0)
 
 
@@ -85,6 +91,7 @@ class RealtimeBridgeContext(HandlerContext):
         self.current_speech_id: Optional[str] = None
         # Emotion announced by the bridge, applied to the next reply's speech_id.
         self.pending_emotion: Optional[str] = None
+        self.current_image: Optional[np.ndarray] = None
 
 
 class HandlerRealtimeBridge(HandlerBase, ABC):
@@ -128,6 +135,8 @@ class HandlerRealtimeBridge(HandlerBase, ABC):
             "avatar_audio", 1, self.config.output_sample_rate))
 
         inputs = {ChatDataType.MIC_AUDIO: HandlerDataInfo(type=ChatDataType.MIC_AUDIO)}
+        if self.config.enable_video_input:
+            inputs[ChatDataType.CAMERA_VIDEO] = HandlerDataInfo(type=ChatDataType.CAMERA_VIDEO)
         outputs = {ChatDataType.AVATAR_AUDIO: HandlerDataInfo(
             type=ChatDataType.AVATAR_AUDIO, definition=output_def)}
         return HandlerDetail(inputs=inputs, outputs=outputs)
@@ -175,6 +184,10 @@ class HandlerRealtimeBridge(HandlerBase, ABC):
                         msg = json.loads(raw)
                     except Exception:
                         continue
+                    if msg.get("type") == "image_request":
+                        ws.send(json.dumps({"type": "image", "id": msg.get("id"),
+                                            "image_url": self._snapshot(context)}))
+                        continue
                     self._handle_bridge_event(context, msg)
             finally:
                 context._connected.clear()
@@ -193,6 +206,20 @@ class HandlerRealtimeBridge(HandlerBase, ABC):
             pass
         except Exception as e:
             logger.warning(f"RealtimeBridge sender error: {e!r}")
+
+    @staticmethod
+    def _snapshot(context: RealtimeBridgeContext) -> Optional[str]:
+        image = context.current_image
+        if image is None:
+            logger.info("RealtimeBridge: image requested but no camera frame available")
+            return None
+        try:
+            data_url = ImageUtils.format_image(image)
+        except Exception as e:
+            logger.warning(f"RealtimeBridge: camera frame encoding failed: {e!r}")
+            return None
+        logger.info("RealtimeBridge: sending camera frame to bridge")
+        return data_url
 
     def _pop_chunk(self, context: RealtimeBridgeContext, timeout: float) -> Optional[str]:
         with context._outbound_cv:
@@ -264,6 +291,9 @@ class HandlerRealtimeBridge(HandlerBase, ABC):
     def handle(self, context: HandlerContext, inputs: ChatData,
                output_definitions: Dict[ChatDataType, HandlerDataInfo]):
         context = cast(RealtimeBridgeContext, context)
+        if inputs.type == ChatDataType.CAMERA_VIDEO:
+            context.current_image = inputs.data.get_main_data()
+            return
         if inputs.type != ChatDataType.MIC_AUDIO:
             return
         if not context._connected.is_set():

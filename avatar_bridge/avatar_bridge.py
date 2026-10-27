@@ -955,7 +955,9 @@ async def chat_completions(request: Request, api_key: str = Depends(verify_api_k
 # Wire protocol (engine <-> bridge), JSON text frames:
 #   engine -> bridge:
 #     {"type":"audio","audio_b64":"<base64 16-bit PCM 24kHz>"}
+#     {"type":"image","id":"...","image_url":"data:image/jpeg;base64,..."|null}
 #   bridge -> engine:
+#     {"type":"image_request","id":"..."}                     # camera frame for a vision turn
 #     {"type":"audio","audio_b64":"...","response_id":"..."}  # 24kHz PCM
 #     {"type":"audio_done","response_id":"..."}               # end of a reply
 #     {"type":"speech_started"}                               # user barge-in
@@ -977,6 +979,42 @@ def split_emotion_tags(text: str) -> tuple[str, str | None]:
     return _EMOTION_TAG_RE.sub("", text or "").strip(), emotion
 
 
+# Vision: the camera frame goes to OpenClaw (the brain), not to the Realtime
+# model, which only voices OpenClaw's reply. On demand, only visual questions
+# carry a frame (same pattern as the engine's LLMOpenAICompatible handler).
+VISION_ENABLED = os.environ.get("VISION_ENABLED", "true").lower() in ("true", "1", "yes")
+VISION_ON_DEMAND = os.environ.get("VISION_ON_DEMAND", "true").lower() in ("true", "1", "yes")
+VISION_REQUEST_TIMEOUT = float(os.environ.get("VISION_REQUEST_TIMEOUT", "2.0"))
+_VISUAL_QUERY_PATTERN = re.compile(
+    r"\b("
+    r"regarde\w*|voi[rst]\w*|vu\b|yeux|oeil|"
+    r"cam[eé]ra|webcam|photo|image|[eé]cran|"
+    r"montre\w*|tiens|tient|main\w*|doigt\w*|"
+    r"porte\w*|habill\w*|v[eê]tement\w*|t-?shirt|chemise|chandail|pull|veste|manteau|"
+    r"lunette\w*|casquette|chapeau|casque|cheveux|barbe|visage|t[eê]te|souri\w*|grimace|"
+    r"air\b|trouves|ressemble\w*|couleur\w*|objet\w*|"
+    r"derri[eè]re|devant|autour|fond|pi[eè]ce|chambre|bureau|salon|mur\w*|"
+    r"celui[- ]ci|celui[- ]l[aà]|celle[- ]ci|celle[- ]l[aà]|ceci|"
+    r"qu['\s]*est[- ]ce que c['\s]*est|qui est[- ]ce|qu['\s]*est[- ]ce que j['\s]*ai|"
+    r"look\w*|see\b|seeing|watch\w*|show\w*|holding|wearing|glasses|shirt|behind"
+    r")\b",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def should_attach_camera(transcript: str) -> bool:
+    if not VISION_ENABLED or not transcript:
+        return False
+    return not VISION_ON_DEMAND or bool(_VISUAL_QUERY_PATTERN.search(transcript))
+
+
+def _data_url_mime(url: str) -> str:
+    header = url.partition(",")[0]
+    if header.startswith("data:") and ";" in header:
+        return header[len("data:"):header.index(";")]
+    return "image/jpeg"
+
+
 class RealtimeVoiceSession:
     """One full-duplex voice session: OpenAI Realtime WS + OpenClaw gateway."""
 
@@ -986,6 +1024,7 @@ class RealtimeVoiceSession:
         # async callable(dict) -> sends an event to the engine
         self._emit = emit
         self._turn_tasks: set = set()
+        self._image_waiters: dict = {}
 
     async def connect(self):
         url = f"{REALTIME_URL}?model={REALTIME_MODEL}"
@@ -1038,18 +1077,10 @@ class RealtimeVoiceSession:
             "audio": audio_b64,
         }))
 
-    async def _run_turn(self, transcript: str):
-        log.info(f"[Realtime] User turn: '{transcript[:80]}'")
-        await self._emit({"type": "text", "text": f"[user] {transcript}"})
-        reply = await asyncio.get_running_loop().run_in_executor(None, call_openclaw, transcript)
-        reply, emotion = split_emotion_tags(reply or "")
-        reply = reply or "Désolé, je n'ai pas compris."
-        log.info(f"[Realtime] Agent reply ({emotion or 'neutre'}): '{reply[:80]}'")
-        if emotion:
-            await self._emit({"type": "emotion", "emotion": emotion})
+    @staticmethod
+    def _speak_instructions(reply: str, emotion: str | None) -> dict:
         tone = f" Exprime l'émotion « {emotion.split(':')[0]} » dans ton intonation." if emotion else ""
-        # Out-of-band response: the model only voices the OpenClaw reply.
-        await self.openai_ws.send(json.dumps({
+        return {
             "type": "response.create",
             "response": {
                 "conversation": "none",
@@ -1060,7 +1091,49 @@ class RealtimeVoiceSession:
                     f"retirer ni commenter.{tone}\n\n" + reply
                 ),
             },
-        }))
+        }
+
+    async def request_image(self) -> str | None:
+        """Ask the engine for its latest camera frame (data URL), or None."""
+        req_id = uuid.uuid4().hex
+        fut = asyncio.get_running_loop().create_future()
+        self._image_waiters[req_id] = fut
+        try:
+            await self._emit({"type": "image_request", "id": req_id})
+            return await asyncio.wait_for(fut, timeout=VISION_REQUEST_TIMEOUT)
+        except asyncio.TimeoutError:
+            log.warning("[Realtime] camera frame request timed out")
+            return None
+        finally:
+            self._image_waiters.pop(req_id, None)
+
+    def on_engine_image(self, req_id: str, image_url: str | None):
+        fut = self._image_waiters.get(req_id)
+        if fut is not None and not fut.done():
+            fut.set_result(image_url or None)
+
+    async def _run_turn(self, transcript: str):
+        log.info(f"[Realtime] User turn: '{transcript[:80]}'")
+        await self._emit({"type": "text", "text": f"[user] {transcript}"})
+        if AVATAR_SAFE_MODE and is_message_blocked(transcript):
+            await self.openai_ws.send(json.dumps(self._speak_instructions(SAFE_MODE_BLOCKED_RESPONSE, None)))
+            return
+        attachments = []
+        if should_attach_camera(transcript):
+            image_url = await self.request_image()
+            if image_url:
+                attachments.append({"content": image_url, "mimeType": _data_url_mime(image_url)})
+                log.info("[Realtime] Attaching camera frame to OpenClaw turn")
+        reply = await asyncio.get_running_loop().run_in_executor(
+            None, call_openclaw, openclaw_turn_message(transcript), attachments or None
+        )
+        reply, emotion = split_emotion_tags(reply or "")
+        reply = reply or "Désolé, je n'ai pas compris."
+        log.info(f"[Realtime] Agent reply ({emotion or 'neutre'}): '{reply[:80]}'")
+        if emotion:
+            await self._emit({"type": "emotion", "emotion": emotion})
+        # Out-of-band response: the model only voices the OpenClaw reply.
+        await self.openai_ws.send(json.dumps(self._speak_instructions(reply, emotion)))
 
     def _on_transcript_done(self, transcript: str):
         transcript = (transcript or "").strip()
@@ -1148,6 +1221,8 @@ async def realtime_voice(ws: WebSocket):
                 continue
             if msg.get("type") == "audio":
                 await session.send_audio(msg.get("audio_b64", ""))
+            elif msg.get("type") == "image":
+                session.on_engine_image(msg.get("id", ""), msg.get("image_url"))
 
     tasks = [asyncio.ensure_future(engine_reader()), asyncio.ensure_future(session.openai_reader())]
     try:
