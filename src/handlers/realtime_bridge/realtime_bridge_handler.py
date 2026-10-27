@@ -19,6 +19,7 @@ Wire protocol (engine <-> bridge), JSON text frames:
     {"type":"audio","audio_b64":"...","response_id":"..."}  # 24kHz PCM
     {"type":"audio_done","response_id":"..."}               # end of a reply
     {"type":"speech_started"}                               # user barge-in
+    {"type":"emotion","emotion":"joie"}                     # face emotion for the next reply
     {"type":"text","text":"..."}                            # transcript (debug)
 
 Reversible: this is an ADDITION. SileroVad/Whisper/Coqui stay intact; enabling
@@ -43,6 +44,7 @@ from chat_engine.data_models.chat_data.chat_data_model import ChatData
 from chat_engine.data_models.chat_data_type import ChatDataType
 from chat_engine.data_models.chat_engine_config_data import ChatEngineConfigModel, HandlerBaseConfigModel
 from chat_engine.data_models.runtime_data.data_bundle import DataBundle, DataBundleDefinition, DataBundleEntry
+from handlers.avatar.emotion.emotion_arkit import NEUTRAL_EMOTION, canonical_emotion
 
 # OpenAI Realtime input/output is 24kHz mono 16-bit PCM.
 REALTIME_SAMPLE_RATE = 24000
@@ -81,6 +83,8 @@ class RealtimeBridgeContext(HandlerContext):
         self.ws = None
         # speech_id of the reply currently being played, so LAM keeps one stream per reply.
         self.current_speech_id: Optional[str] = None
+        # Emotion announced by the bridge, applied to the next reply's speech_id.
+        self.pending_emotion: Optional[str] = None
 
 
 class HandlerRealtimeBridge(HandlerBase, ABC):
@@ -204,6 +208,8 @@ class HandlerRealtimeBridge(HandlerBase, ABC):
             self._emit_audio(context, msg.get("audio_b64", ""), msg.get("response_id") or "")
         elif mtype == "audio_done":
             self._emit_speech_end(context)
+        elif mtype == "emotion":
+            context.pending_emotion = canonical_emotion(msg.get("emotion"))
         elif mtype == "speech_started":
             logger.info("RealtimeBridge: user speech started")
         elif mtype == "text":
@@ -233,6 +239,12 @@ class HandlerRealtimeBridge(HandlerBase, ABC):
         speech_id = f"rt-{response_id}" if response_id else f"rt-{context.session_id}"
         if context.current_speech_id is not None and context.current_speech_id != speech_id:
             self._emit_speech_end(context)
+        if context.current_speech_id != speech_id:
+            emotion = context.pending_emotion or NEUTRAL_EMOTION
+            context.pending_emotion = None
+            logger.info(f"Avatar emotion for {speech_id}: {emotion}")
+            if context.shared_states is not None:
+                context.shared_states.set_avatar_emotion(speech_id, emotion)
         context.current_speech_id = speech_id
         frame = context.config.output_frame_size
         for i in range(0, audio.size, frame):

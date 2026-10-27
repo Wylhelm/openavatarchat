@@ -959,10 +959,22 @@ async def chat_completions(request: Request, api_key: str = Depends(verify_api_k
 #     {"type":"audio","audio_b64":"...","response_id":"..."}  # 24kHz PCM
 #     {"type":"audio_done","response_id":"..."}               # end of a reply
 #     {"type":"speech_started"}                               # user barge-in
+#     {"type":"emotion","emotion":"joie"}                     # face emotion for the next reply
 #     {"type":"text","text":"..."}                            # transcript (debug)
 
 REALTIME_TRANSCRIBE_MODEL = os.environ.get("REALTIME_TRANSCRIBE_MODEL", "gpt-4o-transcribe")
 REALTIME_LANGUAGE = os.environ.get("REALTIME_LANGUAGE", "fr")
+
+# OpenClaw replies carry [emotion] / [emotion:0.4] tags for the avatar face.
+# They must not be read aloud; the engine validates the name against its emotion set.
+_EMOTION_TAG_RE = re.compile(r"\[\s*([A-Za-zÀ-ÿ]+(?:\s*:\s*[0-9]+(?:[.,][0-9]+)?)?)\s*\][ \t]*")
+
+
+def split_emotion_tags(text: str) -> tuple[str, str | None]:
+    """Returns (text without tags, first tag) for an OpenClaw reply."""
+    m = _EMOTION_TAG_RE.search(text or "")
+    emotion = m.group(1).strip() if m else None
+    return _EMOTION_TAG_RE.sub("", text or "").strip(), emotion
 
 
 class RealtimeVoiceSession:
@@ -1030,8 +1042,12 @@ class RealtimeVoiceSession:
         log.info(f"[Realtime] User turn: '{transcript[:80]}'")
         await self._emit({"type": "text", "text": f"[user] {transcript}"})
         reply = await asyncio.get_running_loop().run_in_executor(None, call_openclaw, transcript)
-        reply = (reply or "").strip() or "Désolé, je n'ai pas compris."
-        log.info(f"[Realtime] Agent reply: '{reply[:80]}'")
+        reply, emotion = split_emotion_tags(reply or "")
+        reply = reply or "Désolé, je n'ai pas compris."
+        log.info(f"[Realtime] Agent reply ({emotion or 'neutre'}): '{reply[:80]}'")
+        if emotion:
+            await self._emit({"type": "emotion", "emotion": emotion})
+        tone = f" Exprime l'émotion « {emotion.split(':')[0]} » dans ton intonation." if emotion else ""
         # Out-of-band response: the model only voices the OpenClaw reply.
         await self.openai_ws.send(json.dumps({
             "type": "response.create",
@@ -1041,7 +1057,7 @@ class RealtimeVoiceSession:
                 "output_modalities": ["audio"],
                 "instructions": (
                     "Lis le texte suivant à voix haute, mot pour mot, sans rien ajouter, "
-                    "retirer ni commenter :\n\n" + reply
+                    f"retirer ni commenter.{tone}\n\n" + reply
                 ),
             },
         }))
