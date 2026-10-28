@@ -970,8 +970,13 @@ REALTIME_LANGUAGE = os.environ.get("REALTIME_LANGUAGE", "fr")
 # Québécois French + proper nouns the avatar hears constantly.
 REALTIME_TRANSCRIBE_CONTEXT = os.environ.get(
     "REALTIME_TRANSCRIBE_CONTEXT",
-    "Français québécois (accent du Québec). Noms propres: G-Bot, Poukie, Timimi, Minuit, Aurélie, Guillaume, Firefly, Vikunja, OpenClaw.",
+    "Français québécois (accent du Québec), conversation avec un assistant vocal domotique.",
 )
+# Literal terms the STT must transcribe exactly (device names, proper nouns, apps).
+REALTIME_TRANSCRIBE_KEYWORDS = os.environ.get(
+    "REALTIME_TRANSCRIBE_KEYWORDS",
+    "G-Bot, Poukie, Timimi, Minuit, Aurélie, Guillaume, Tapo, Roborock, S7, Hue, Govee, humidificateur, Firefly, Vikunja, OpenClaw, HA, Home Assistant, Nest Hub, Shield, NVIDIA, Immich, Grafana, InfluxDB, Telegram",
+).split(",")
 
 # OpenClaw replies carry [emotion] / [emotion:0.4] tags for the avatar face.
 # They must not be read aloud; the engine validates the name against its emotion set.
@@ -1048,10 +1053,11 @@ class RealtimeVoiceSession:
                 "audio": {
                     "input": {
                         "format": {"type": "audio/pcm", "rate": 24000},
-                        # The reply comes from OpenClaw, not from the Realtime model,
-                        # so the model must not answer on its own at end of speech.
-                        # Transcription now lives in a separate gpt-live-transcribe
-                        # session (see TranscriptionSession), not here.
+                        # The TTS session's semantic_vad is the end-of-speech detector
+                        # that emits speech_stopped, which then commits the transcription
+                        # buffer (see _on_speech_event). Without it, nothing commits and
+                        # the avatar never responds. The reply itself still comes from
+                        # OpenClaw (create_response=False), never from this model.
                         "turn_detection": {
                             "type": "semantic_vad",
                             "create_response": False,
@@ -1234,6 +1240,7 @@ class TranscriptionSession:
                             "model": "gpt-live-transcribe",
                             "prompt": REALTIME_TRANSCRIBE_CONTEXT,
                             "languages": [REALTIME_LANGUAGE],
+                            "keywords": [k.strip() for k in REALTIME_TRANSCRIBE_KEYWORDS if k.strip()],
                         },
                     },
                 },
