@@ -964,8 +964,14 @@ async def chat_completions(request: Request, api_key: str = Depends(verify_api_k
 #     {"type":"emotion","emotion":"joie"}                     # face emotion for the next reply
 #     {"type":"text","text":"..."}                            # transcript (debug)
 
-REALTIME_TRANSCRIBE_MODEL = os.environ.get("REALTIME_TRANSCRIBE_MODEL", "gpt-4o-transcribe")
+REALTIME_TRANSCRIBE_MODEL = os.environ.get("REALTIME_TRANSCRIBE_MODEL", "gpt-live-transcribe")
 REALTIME_LANGUAGE = os.environ.get("REALTIME_LANGUAGE", "fr")
+# Transcription context: names/dialect the live STT should bias toward.
+# Québécois French + proper nouns the avatar hears constantly.
+REALTIME_TRANSCRIBE_CONTEXT = os.environ.get(
+    "REALTIME_TRANSCRIBE_CONTEXT",
+    "Français québécois (accent du Québec). Noms propres: G-Bot, Poukie, Timimi, Minuit, Aurélie, Guillaume, Firefly, Vikunja, OpenClaw.",
+)
 
 # OpenClaw replies carry [emotion] / [emotion:0.4] tags for the avatar face.
 # They must not be read aloud; the engine validates the name against its emotion set.
@@ -1025,6 +1031,9 @@ class RealtimeVoiceSession:
         self._emit = emit
         self._turn_tasks: set = set()
         self._image_waiters: dict = {}
+        # Optional callback(dict) -> None, set by the bridge to coordinate the
+        # separate transcription session (e.g. commit on end-of-speech).
+        self.on_speech_event = None
 
     async def connect(self):
         url = f"{REALTIME_URL}?model={REALTIME_MODEL}"
@@ -1041,14 +1050,12 @@ class RealtimeVoiceSession:
                         "format": {"type": "audio/pcm", "rate": 24000},
                         # The reply comes from OpenClaw, not from the Realtime model,
                         # so the model must not answer on its own at end of speech.
+                        # Transcription now lives in a separate gpt-live-transcribe
+                        # session (see TranscriptionSession), not here.
                         "turn_detection": {
                             "type": "semantic_vad",
                             "create_response": False,
                             "interrupt_response": True,
-                        },
-                        "transcription": {
-                            "model": REALTIME_TRANSCRIBE_MODEL,
-                            "language": REALTIME_LANGUAGE,
                         },
                     },
                     "output": {
@@ -1113,6 +1120,13 @@ class RealtimeVoiceSession:
             fut.set_result(image_url or None)
 
     async def _run_turn(self, transcript: str):
+        try:
+            await self._run_turn_inner(transcript)
+        except Exception:
+            import traceback
+            log.error(f"[Realtime] _run_turn failed: {traceback.format_exc()}")
+
+    async def _run_turn_inner(self, transcript: str):
         log.info(f"[Realtime] User turn: '{transcript[:80]}'")
         await self._emit({"type": "text", "text": f"[user] {transcript}"})
         if AVATAR_SAFE_MODE and is_message_blocked(transcript):
@@ -1163,6 +1177,13 @@ class RealtimeVoiceSession:
                 log.warning(f"[Realtime] response {resp.get('status')}: {resp.get('status_details')}")
         elif etype == "input_audio_buffer.speech_started":
             await self._emit({"type": "speech_started"})
+            if self.on_speech_event:
+                await self.on_speech_event({"type": "speech_started"})
+        elif etype == "input_audio_buffer.speech_stopped":
+            # End of user turn: commit the transcription buffer so the live-STT
+            # session emits its final transcript.
+            if self.on_speech_event:
+                await self.on_speech_event({"type": "speech_stopped"})
         elif etype == "error":
             log.error(f"[Realtime] OpenAI error: {msg.get('error')}")
         elif etype == "conversation.item.input_audio_transcription.failed":
@@ -1180,6 +1201,82 @@ class RealtimeVoiceSession:
                 await self._handle_openai_event(msg)
             except Exception as e:
                 log.error(f"[Realtime] event handler error: {e}")
+
+
+class TranscriptionSession:
+    """Dedicated live STT session using gpt-live-transcribe.
+
+    gpt-4o-transcribe is an offline/file model and struggles with streaming and
+    Québec French. gpt-live-transcribe is purpose-built for live streaming, with
+    prompt/keywords/languages hints, so it handles the natural accent far better.
+    It runs over a SEPARATE WebSocket (?intent=transcription) because it is not
+    supported inside a gpt-realtime conversation session.
+    """
+
+    def __init__(self, on_transcript):
+        self.on_transcript = on_transcript  # async callable(str)
+        self.ws = None
+        self.api_key = _load_openai_api_key()
+
+    async def connect(self):
+        url = f"{REALTIME_URL}?intent=transcription"
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+        self.ws = await websockets.connect(url, additional_headers=headers, max_size=None)
+        await self.ws.send(json.dumps({
+            "type": "session.update",
+            "session": {
+                "type": "transcription",
+                "audio": {
+                    "input": {
+                        "format": {"type": "audio/pcm", "rate": 24000},
+                        "turn_detection": None,
+                        "transcription": {
+                            "model": "gpt-live-transcribe",
+                            "prompt": REALTIME_TRANSCRIBE_CONTEXT,
+                            "languages": [REALTIME_LANGUAGE],
+                        },
+                    },
+                },
+            },
+        }))
+        log.info("[Realtime] Transcription session connected (gpt-live-transcribe)")
+
+    async def append_audio(self, audio_b64: str):
+        if self.ws is None or not audio_b64:
+            return
+        await self.ws.send(json.dumps({
+            "type": "input_audio_buffer.append",
+            "audio": audio_b64,
+        }))
+
+    async def commit(self):
+        """End the current turn so the final transcript is emitted."""
+        if self.ws is None:
+            return
+        await self.ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
+
+    async def reader(self):
+        async for raw in self.ws:
+            try:
+                msg = json.loads(raw)
+            except Exception:
+                continue
+            etype = msg.get("type", "")
+            if etype == "conversation.item.input_audio_transcription.completed":
+                t = (msg.get("transcript") or "").strip()
+                if t:
+                    # on_transcript is a SYNC callback (RealtimeVoiceSession._on_transcript_done),
+                    # so no await here.
+                    self.on_transcript(t)
+            elif etype == "conversation.item.input_audio_transcription.failed":
+                log.error(f"[Realtime] transcription failed: {msg.get('error')}")
+
+    async def close(self):
+        if self.ws is not None:
+            try:
+                await self.ws.close()
+            except Exception:
+                pass
 
 
 @app.websocket("/realtime/voice")
@@ -1210,6 +1307,22 @@ async def realtime_voice(ws: WebSocket):
         log.error(f"[Realtime] OpenAI connect failed: {e}")
         await ws.close(code=1011, reason="openai realtime connect failed")
         return
+
+    # Dedicated live-STT session (gpt-live-transcribe) for natural Québec French.
+    transcription = TranscriptionSession(session._on_transcript_done)
+    try:
+        await transcription.connect()
+    except Exception as e:
+        log.warning(f"[Realtime] transcription session connect failed (continuing without live STT): {e}")
+        transcription = None
+
+    # When the TTS session's VAD detects end of speech, commit the transcription
+    # buffer so gpt-live-transcribe emits its final transcript.
+    async def _on_speech_event(ev: dict):
+        if transcription is not None and ev.get("type") == "speech_stopped":
+            await transcription.commit()
+    session.on_speech_event = _on_speech_event
+
     log.info("[Realtime] Engine connected")
 
     async def engine_reader():
@@ -1220,21 +1333,36 @@ async def realtime_voice(ws: WebSocket):
             except Exception:
                 continue
             if msg.get("type") == "audio":
-                await session.send_audio(msg.get("audio_b64", ""))
+                b64 = msg.get("audio_b64", "")
+                # Feed the same mic audio to BOTH the TTS session (for VAD) and
+                # the transcription session (for STT).
+                await session.send_audio(b64)
+                if transcription is not None:
+                    await transcription.append_audio(b64)
             elif msg.get("type") == "image":
                 session.on_engine_image(msg.get("id", ""), msg.get("image_url"))
 
-    tasks = [asyncio.ensure_future(engine_reader()), asyncio.ensure_future(session.openai_reader())]
+    tasks = [
+        asyncio.ensure_future(engine_reader()),
+        asyncio.ensure_future(session.openai_reader()),
+    ]
+    if transcription is not None:
+        tasks.append(asyncio.ensure_future(transcription.reader()))
+
     try:
         done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         for t in done:
             exc = t.exception()
             if exc is not None and not isinstance(exc, WebSocketDisconnect):
-                log.warning(f"[Realtime] session ended: {exc!r}")
+                import traceback
+                tb = ''.join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+                log.warning(f"[Realtime] session ended: {exc!r}\n{tb}")
     finally:
         for t in tasks:
             t.cancel()
         await session.close()
+        if transcription is not None:
+            await transcription.close()
         try:
             await ws.close()
         except Exception:
