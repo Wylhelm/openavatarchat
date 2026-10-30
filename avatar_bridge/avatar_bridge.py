@@ -8,10 +8,13 @@ import subprocess
 import time
 import uuid
 import base64
+import math
 import requests
 import logging
 import threading
 import websockets
+
+import numpy as np
 from fastapi import FastAPI, HTTPException, Request, Depends, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -1026,6 +1029,135 @@ def _data_url_mime(url: str) -> str:
     return "image/jpeg"
 
 
+# FFT window size for echo filtering (must match the 24 kHz mic stream).
+_ECHO_NFFT = 1024
+_HANN = np.hanning(_ECHO_NFFT).astype(np.float32)
+
+
+class SpectralEchoCanceller:
+    """Software acoustic-echo canceller for hands-free / speakerphone use.
+
+    The avatar's speaker leaks its own voice back into the mic. The bridge knows
+    exactly when the avatar is speaking (response.output_audio.delta) and gets the
+    same mic stream, so it can subtract the echo *without muting the mic* — the
+    user's barge-in voice stays audible.
+
+    Ported from the engine's proven SileroVad.filter_mobile_no_aec_clip logic:
+      * The client player high-passes its speaker output at ~310 Hz, so real human
+        vocal-cord energy lives in the low band (93..225 Hz) while the avatar's
+        echo dominates the mid band (>310 Hz).
+      * While the avatar speaks, we learn a rolling echo magnitude envelope and
+        subtract it from each frame's spectrum. Frames that carry clear human
+        fundamental energy are passed through (barge-in); pure echo frames are
+        suppressed to near-silence.
+    """
+
+    def __init__(self):
+        self.echo_low_rms = 0.0005
+        self.echo_mid_rms = 0.0020
+        self.echo_mag_env = None  # np.ndarray | None
+        self.avatar_speech_frames = 0
+        self.was_avatar_speaking = False
+
+    def reset(self):
+        self.echo_low_rms = 0.0005
+        self.echo_mid_rms = 0.0020
+        self.echo_mag_env = None
+        self.avatar_speech_frames = 0
+
+    def process(self, clip: np.ndarray, avatar_speaking: bool) -> np.ndarray:
+        """Return the (possibly echo-reduced) clip to feed to VAD/STT.
+
+        The engine streams mic chunks of 2400 samples @ 24 kHz. We window them
+        into _ECHO_NFFT (1024) frames for the FFT, filter each frame, and
+        reassemble — so a full chunk is never dropped (barge-in stays possible).
+        """
+        if avatar_speaking and not self.was_avatar_speaking:
+            self.reset()
+        self.was_avatar_speaking = avatar_speaking
+
+        if not avatar_speaking:
+            return clip
+
+        if clip.size == 0:
+            return clip
+
+        out = np.zeros_like(clip)
+        n = clip.size
+        step = _ECHO_NFFT
+        for start in range(0, n, step):
+            frame = clip[start:start + step]
+            if frame.size < step:
+                frame = np.pad(frame, (0, step - frame.size))
+            out[start:start + step] = self._filter_frame(frame)[:min(step, n - start)]
+        return out
+
+    def _filter_frame(self, clip: np.ndarray) -> np.ndarray:
+        """Filter a single _ECHO_NFFT frame of mic audio (avatar speaking)."""
+        rms = float(np.sqrt(np.mean(np.square(clip)))) if clip.size > 0 else 0.0
+        self.avatar_speech_frames += 1
+        spec = np.fft.rfft(clip * _HANN)
+        mag = np.abs(spec).astype(np.float32)
+
+        # 24 kHz, NFFT 1024 -> bin width = 24000/1024 ≈ 23.44 Hz.
+        # Vocal-cord fundamental: 93.75..187.5 Hz -> bins 4..8.
+        # Speaker echo band: 312.5..3593.75 Hz -> bins ~13..153.
+        low_energy = float(np.sum(np.square(mag[4:9])) + 0.64 * float(mag[9] ** 2))
+        low_rms = math.sqrt(low_energy / (_ECHO_NFFT * 192.0))
+        mid_energy = float(np.sum(np.square(mag[13:154])))
+        mid_rms = math.sqrt(mid_energy / (_ECHO_NFFT * 192.0))
+        low_mid_ratio = low_rms / (mid_rms + 1e-6)
+
+        # Pure speaker echo frame (client player high-passes at 310 Hz).
+        if low_mid_ratio < 0.068 and mid_rms > 0.0004:
+            self.echo_low_rms = 0.85 * self.echo_low_rms + 0.15 * low_rms
+            self.echo_mid_rms = max(0.93 * self.echo_mid_rms, 0.80 * self.echo_mid_rms + 0.20 * mid_rms)
+            if self.echo_mag_env is None:
+                self.echo_mag_env = mag.copy()
+            else:
+                self.echo_mag_env = np.maximum(
+                    0.90 * self.echo_mag_env, 0.75 * self.echo_mag_env + 0.25 * mag
+                )
+
+        # During the first frames after the avatar starts speaking the echo
+        # tracker is still calibrating on the first syllable, so require clear
+        # low-frequency voice energy before trusting a frame as barge-in.
+        calibrating = self.avatar_speech_frames <= 10
+        user_voice_detected = (
+            (
+                rms >= 0.0022
+                and low_rms >= max(0.00095 if calibrating else 0.00080, self.echo_low_rms * 2.6)
+                and low_mid_ratio >= (0.088 if calibrating else 0.078)
+            )
+            or (
+                not calibrating
+                and mid_rms < 0.0014
+                and rms >= 0.0026
+                and low_rms >= max(0.00085, self.echo_low_rms * 2.0)
+                and low_mid_ratio >= 0.080
+            )
+            or (
+                rms >= max(0.012, self.echo_mid_rms * 2.8)
+                and low_rms >= max(0.0011, self.echo_low_rms * 2.1)
+                and low_mid_ratio >= 0.075
+            )
+        )
+
+        if not user_voice_detected:
+            # Echo-only frame: suppress it so the VAD/STT never hears the avatar.
+            return np.zeros_like(clip)
+
+        # Real user voice over echo: subtract the learned echo envelope.
+        if self.echo_mag_env is not None:
+            clean_mag = mag.copy()
+            clean_mag[12:155] = np.maximum(
+                0.15 * mag[12:155], mag[12:155] - 1.15 * self.echo_mag_env[12:155]
+            )
+            clean_spec = spec * (clean_mag / (mag + 1e-8))
+            return np.fft.irfft(clean_spec, n=_ECHO_NFFT).astype(np.float32)
+        return clip
+
+
 class RealtimeVoiceSession:
     """One full-duplex voice session: OpenAI Realtime WS + OpenClaw gateway."""
 
@@ -1036,6 +1168,11 @@ class RealtimeVoiceSession:
         self._emit = emit
         self._turn_tasks: set = set()
         self._image_waiters: dict = {}
+        # True while the avatar is playing audio (response.output_audio.delta).
+        # Drives the software AEC: we subtract the avatar's own echo from the mic
+        # WITHOUT muting it, so vocal barge-in stays intact.
+        self._avatar_speaking = False
+        self._echo_canceller = SpectralEchoCanceller()
         # Optional callback(dict) -> None, set by the bridge to coordinate the
         # separate transcription session (e.g. commit on end-of-speech).
         self.on_speech_event = None
@@ -1085,6 +1222,16 @@ class RealtimeVoiceSession:
     async def send_audio(self, audio_b64: str):
         if self.openai_ws is None or not audio_b64:
             return
+        # Software AEC: while the avatar is speaking, subtract its own echo from
+        # the mic stream WITHOUT muting it, so the user's barge-in voice survives.
+        try:
+            pcm = np.frombuffer(base64.b64decode(audio_b64), dtype=np.int16).astype(np.float32) / 32768.0
+            if self._avatar_speaking and pcm.size > 0:
+                cleaned = self._echo_canceller.process(pcm, True)
+                pcm = np.clip(cleaned, -1.0, 1.0)
+                audio_b64 = base64.b64encode((pcm * 32767.0).astype(np.int16).tobytes()).decode()
+        except Exception:
+            pass
         await self.openai_ws.send(json.dumps({
             "type": "input_audio_buffer.append",
             "audio": audio_b64,
@@ -1171,6 +1318,9 @@ class RealtimeVoiceSession:
         elif etype in ("response.output_audio.delta", "response.audio.delta"):
             d = msg.get("delta", "")
             if d:
+                # Avatar starts speaking: engage the software AEC so its own
+                # echo is subtracted from the mic while barge-in stays possible.
+                self._avatar_speaking = True
                 await self._emit({"type": "audio", "audio_b64": d, "response_id": msg.get("response_id", "")})
         elif etype in ("response.output_audio_transcript.delta", "response.audio_transcript.delta"):
             d = msg.get("delta", "")
@@ -1179,6 +1329,9 @@ class RealtimeVoiceSession:
         elif etype == "response.done":
             resp = msg.get("response", {}) or {}
             await self._emit({"type": "audio_done", "response_id": resp.get("id", "")})
+            # Reply finished: stop the AEC and reset its tracker for the next turn.
+            self._avatar_speaking = False
+            self._echo_canceller.reset()
             if resp.get("status") not in (None, "completed"):
                 log.warning(f"[Realtime] response {resp.get('status')}: {resp.get('status_details')}")
         elif etype == "input_audio_buffer.speech_started":
